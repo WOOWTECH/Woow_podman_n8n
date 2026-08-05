@@ -41,8 +41,8 @@
 
    | 欄位 | 值 |
    |------|-----|
-   | **Repository URL** | `https://github.com/WOOWTECH/Woow_n8n_docker_compose_all` |
-   | **Repository reference** | `refs/heads/podman` |
+   | **Repository URL** | `https://github.com/WOOWTECH/Woow_podman_n8n` |
+   | **Repository reference** | `refs/heads/main` |
    | **Compose path** | `docker-compose.yml` |
 
 5. 點擊 **Deploy the stack**
@@ -52,7 +52,7 @@
 1. 複製 `docker-compose.yml` 的 Raw URL：
 
    ```
-   https://raw.githubusercontent.com/WOOWTECH/Woow_n8n_docker_compose_all/podman/docker-compose.yml
+   https://raw.githubusercontent.com/WOOWTECH/Woow_podman_n8n/main/docker-compose.yml
    ```
 
 2. 登入 Portainer → **Stacks** → **Add stack** → **Web editor**
@@ -93,8 +93,8 @@ podman-compose --version
 ### 步驟一：複製儲存庫
 
 ```bash
-git clone https://github.com/WOOWTECH/Woow_n8n_docker_compose_all.git
-cd Woow_n8n_docker_compose_all
+git clone https://github.com/WOOWTECH/Woow_podman_n8n.git
+cd Woow_podman_n8n
 ```
 
 ### 步驟二：設定環境變數
@@ -279,8 +279,8 @@ podman --version && podman-compose --version
 ### 部署
 
 ```bash
-git clone https://github.com/WOOWTECH/Woow_n8n_docker_compose_all.git
-cd Woow_n8n_docker_compose_all
+git clone https://github.com/WOOWTECH/Woow_podman_n8n.git
+cd Woow_podman_n8n
 cp .env.example .env
 # 自動替換 WEBHOOK_URL 為實際伺服器 IP
 SERVER_IP=$(hostname -I | awk '{print $1}')
@@ -315,3 +315,10 @@ podman-compose down -v
 | 資料儲存 | Named volumes（`postgres_data`、`n8n_data`） |
 | 自動重啟 | `unless-stopped` |
 | 網路 | `n8n-network` |
+
+---
+
+## 其他部署平台
+
+- **K3s/Kubernetes(Helm chart)** → [Woow_k3s_n8n](https://github.com/WOOWTECH/Woow_k3s_n8n)
+- **Home Assistant add-on** → [Woow_ha_n8n](https://github.com/WOOWTECH/Woow_ha_n8n)
