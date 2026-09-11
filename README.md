@@ -1,325 +1,233 @@
-# n8n + PostgreSQL Docker Compose (Podman)
+# n8n on rootless Podman (Quadlet + systemd)
 
-Deploy [n8n](https://n8n.io/) workflow automation platform with PostgreSQL database using Podman Compose.
+[n8n](https://n8n.io/) with PostgreSQL and external task runners, deployed as **rootless
+Podman Quadlet units** driven by the user's systemd. The units are the deployment: systemd
+starts the stack at boot (with linger), restarts a crashed container and keeps every version
+pinned in this repository.
 
 [繁體中文版](README.zh-TW.md)
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────┐
-│            Cloudflare Tunnel (optional)           │
-└─────────────────┬────────────────────────────────┘
-                  │
-                  ▼
-┌──────────────────────────────────────────────────┐
-│              Podman Network (n8n-network)         │
-│                                                  │
-│  ┌──────────────────┐    ┌────────────────────┐  │
-│  │       n8n        │    │    PostgreSQL 16    │  │
-│  │   (latest)       │───▶│    (Alpine)         │  │
-│  │  Port: 15678     │    │  Port: 5432 (int)   │  │
-│  └────────┬─────────┘    └────────┬───────────┘  │
-│           │                       │              │
-│           ▼                       ▼              │
-│     n8n_data vol          postgres_data vol       │
-└──────────────────────────────────────────────────┘
+              systemctl --user start|stop|restart n8n.target
+                                  │
+   ┌──────────────────────────────┼───────────────────────────────┐
+   │                              │                               │
+n8n-postgres.service         n8n.service  ◀──Requires──  n8n-runners.service
+postgres:16.15-alpine        n8nio/n8n              n8nio/runners (optional)
+   │  volume                    │  volume                │
+   │  n8n_postgres_data         │  n8n_n8n_data          └── JS + Python Code nodes
+   └──────────────────── network n8n-network ──────────────────────┘
+                                  │
+                     PublishPort HOST_BIND:HOST_PORT -> 5678
+                     (127.0.0.1:15678 by default; a Cloudflare
+                      tunnel or NPM provides public access)
 ```
 
-## Deploy to Portainer
+| File | Unit | What it is |
+|---|---|---|
+| `quadlet/n8n.network` | `n8n-network.service` | bridge network `n8n-network` |
+| `quadlet/n8n-data.volume` | `n8n-data-volume.service` | volume `n8n_n8n_data`: **the credentials encryption key** |
+| `quadlet/n8n-postgres-data.volume` | `n8n-postgres-data-volume.service` | volume `n8n_postgres_data`: PGDATA |
+| `quadlet/n8n-postgres.container` | `n8n-postgres.service` | PostgreSQL 16 |
+| `quadlet/n8n.container` | `n8n.service` | n8n (editor, REST API, webhooks, task broker) |
+| `quadlet/optional/n8n-runners.container` | `n8n-runners.service` | external task runners (default; `--no-runners` skips them) |
+| `systemd/n8n.target` | `n8n.target` | one handle for the whole stack |
 
-Deploy this project instantly using Portainer's Stack feature with our GitHub repository URL.
+Installed to `~/.config/containers/systemd/` (Quadlet), `~/.config/systemd/user/` (target) and
+`~/.config/n8n/n8n.env` (settings, mode 0600). Passwords are podman secrets, never env files.
 
-[![Deploy to Portainer](https://img.shields.io/badge/Deploy_to-Portainer-13BEF9?style=for-the-badge&logo=portainer&logoColor=white)](#deploy-to-portainer)
+## Requirements
 
-### Via Git Repository (Recommended)
-
-1. Log in to your Portainer dashboard
-2. Navigate to **Stacks** → **Add stack**
-3. Select **Repository**
-4. Fill in the following:
-
-   | Field | Value |
-   |-------|-------|
-   | **Repository URL** | `https://github.com/WOOWTECH/Woow_podman_n8n` |
-   | **Repository reference** | `refs/heads/main` |
-   | **Compose path** | `docker-compose.yml` |
-
-5. Click **Deploy the stack**
-
-### Via Web Editor
-
-1. Copy the raw URL of `docker-compose.yml`:
-
-   ```
-   https://raw.githubusercontent.com/WOOWTECH/Woow_podman_n8n/main/docker-compose.yml
-   ```
-
-2. Log in to Portainer → **Stacks** → **Add stack** → **Web editor**
-3. Fetch the content from the URL above using `curl` or your browser, paste into the editor
-4. Set environment variables (refer to `.env`)
-5. Click **Deploy the stack**
-
-## Prerequisites
-
-- Podman (v4.0+)
-- podman-compose (v1.0+)
+- Ubuntu 24.04 or similar, **podman >= 4.9.3** rootless, systemd 255 user units
+- linger for the service user (`sudo loginctl enable-linger $USER`), so the stack survives logout
+- about 1.5 GB of disk for the images (n8n, runners, postgres)
 
 ```bash
-# Check versions
-podman --version
-podman-compose --version
+podman --version && systemctl --user show-environment >/dev/null && echo "user manager ok"
 ```
 
-## Project Structure
-
-```
-.
-├── docker-compose.yml    # Service definitions (n8n + PostgreSQL)
-├── .env.example          # Environment variable template
-├── .env                  # Actual environment variables (git-ignored)
-├── .gitignore            # Git ignore rules
-├── README.md             # English documentation (this file)
-├── README.zh-TW.md       # Chinese documentation
-└── docs/
-    ├── plans/
-    │   └── 2026-02-17-n8n-postgres-podman-design.md
-    └── skills/
-        └── deploy-n8n-postgres.md   # AI deployment skill
-```
-
-## Quick Start
-
-### Step 1: Clone the repository
+## Install
 
 ```bash
-git clone https://github.com/WOOWTECH/Woow_podman_n8n.git
-cd Woow_podman_n8n
+git clone https://github.com/WOOWTECH/Woow_podman_n8n ~/woow-quadlet/Woow_podman_n8n
+cd ~/woow-quadlet/Woow_podman_n8n
+tests/dryrun.sh                 # optional: validates the units against the local generator
+scripts/install.sh              # first run: creates ~/.config/n8n/n8n.env and stops
+$EDITOR ~/.config/n8n/n8n.env   # set HOST_BIND/HOST_PORT, the timezone, the public URL
+scripts/install.sh              # installs, starts and runs the smoke test
 ```
 
-### Step 2: Configure environment
+Behind a Cloudflare tunnel or Nginx Proxy Manager, name the public URL — n8n puts it into
+webhook URLs and OAuth callbacks:
 
 ```bash
-cp .env.example .env
+scripts/install.sh --public-url https://n8n.example.com/
 ```
 
-Edit `.env` and update:
-- `POSTGRES_PASSWORD` - Set a secure password
-- `WEBHOOK_URL` - Replace with your server IP: `http://<SERVER_IP>:15678/`
+The first person to open the editor becomes the owner. **Put the instance behind
+authentication (Cloudflare Access, NPM) or create the owner immediately.**
 
-### Step 3: Start services
+Options: `--no-runners` (internal task runners), `--db-password-file F` (first install only),
+`--no-start`, `--no-smoke`, `--smoke-timeout S`, `--dry-run` (render and validate only).
+
+## Configuration
+
+`~/.config/n8n/n8n.env`, mode 0600, `KEY=value` lines only — no quotes, no inline comments.
+`HOST_*` keys are rendered into the unit files at install time (decision D2); every other key
+is passed to the n8n container, so any [n8n environment variable](https://docs.n8n.io/hosting/configuration/environment-variables/)
+works. Re-run `scripts/install.sh` after an edit: it restarts only what changed.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `HOST_BIND` | `127.0.0.1` | publish address. `0.0.0.0` exposes n8n on every interface |
+| `HOST_PORT` | `15678` | published port (n8n listens on 5678 inside the container) |
+| `N8N_HOST`, `N8N_PROTOCOL` | `localhost`, `http` | hostname and scheme n8n believes it is reached at |
+| `N8N_EDITOR_BASE_URL`, `N8N_WEBHOOK_URL` | unset | public URLs (set by `--public-url`) |
+| `N8N_PROXY_HOPS` | unset | number of proxies in front (1 for a tunnel or NPM) |
+| `GENERIC_TIMEZONE`, `TZ` | `Asia/Taipei` | schedule and log timezone |
+| `N8N_RUNNERS_MODE` | `external` | `external` installs the sidecar, `internal` runs code inside n8n |
+
+Do not set `N8N_PORT` (n8n's port inside the container) or the `DB_POSTGRESDB_*` keys; the
+units own them. `install.sh` warns about keys it ignores.
+
+**Secrets** (podman secrets, created on the first install, never printed):
+
+| Secret | Used by |
+|---|---|
+| `n8n-db-password` | `POSTGRES_PASSWORD` (initdb) and `DB_POSTGRESDB_PASSWORD` |
+| `n8n-runners-auth-token` | n8n and the runners; required even in internal mode |
+
+**Task runners.** External runners run Code-node JavaScript and Python in their own container,
+which is upstream's recommendation: in internal mode a workflow author can read the encryption
+key and every stored credential. `n8nio/n8n` and `n8nio/runners` must carry the same version;
+`tests/dryrun.sh` and `scripts/upgrade.sh` enforce that.
+
+## Operations
 
 ```bash
-podman-compose up -d
+systemctl --user status n8n.service              # one unit
+systemctl --user restart n8n.target              # the whole stack
+journalctl --user -u n8n.service -f              # logs (LogDriver=journald)
+systemctl --user list-timers                     # nothing here; n8n has no timers
+podman exec n8n n8n --version
+tests/smoke.sh                                   # health checks, changes nothing
+tests/smoke.sh --public-url https://n8n.example.com/
 ```
 
-### Step 4: Verify deployment
+## Upgrade
+
+The repository is the source of truth: bump `Image=` in `quadlet/n8n.container` **and**
+`quadlet/optional/n8n-runners.container` (same version), commit, then:
 
 ```bash
-# Check container status
-podman-compose ps
-
-# Health check
-curl -s http://localhost:15678/healthz
-# Expected: {"status":"ok"}
+git pull
+scripts/upgrade.sh              # --allow-major for 2.x -> 3.x
 ```
 
-### Step 5: Access n8n
+It refuses a downgrade, a version skew between n8n and the runners, and a Postgres major
+change; pulls every image before anything stops; backs up; restarts; runs the smoke test with a
+900 s timeout; and on failure puts the previous units back and restores the pre-upgrade
+database automatically (n8n migrations are forward-only).
 
-Open `http://<SERVER_IP>:15678` in your browser.
+**Postgres major upgrade** (16 -> 17) is a separate job: `scripts/backup.sh --cold`, bump the
+image, delete the volume `n8n_postgres_data`, `scripts/install.sh`, then `scripts/restore.sh`.
 
-The first user to register becomes the **admin**.
-
-## Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `POSTGRES_USER` | PostgreSQL username | `n8n` |
-| `POSTGRES_PASSWORD` | PostgreSQL password | *(set in .env)* |
-| `POSTGRES_DB` | Database name | `n8n` |
-| `N8N_PORT` | n8n exposed port | `15678` |
-| `N8N_HOST` | n8n bind address | `0.0.0.0` |
-| `N8N_PROTOCOL` | Protocol (http/https) | `http` |
-| `WEBHOOK_URL` | Webhook callback URL | `http://localhost:15678/` |
-| `GENERIC_TIMEZONE` | Timezone | `Asia/Taipei` |
-
-### Key Configuration Notes
-
-- **`N8N_SECURE_COOKIE=false`** is set in `docker-compose.yml` to allow HTTP login on internal networks. If you use HTTPS (e.g., via Cloudflare Tunnel), you can remove this setting.
-- **`N8N_HOST=0.0.0.0`** allows connections from any IP on the network, not just localhost.
-- **Port 15678** is used to avoid conflicts with other services.
-
-## Common Commands
+## Backup and restore
 
 ```bash
-# Start services (detached)
-podman-compose up -d
-
-# Stop services (keep volumes)
-podman-compose down
-
-# Stop services and delete ALL data
-podman-compose down -v
-
-# View all logs
-podman-compose logs -f
-
-# View n8n logs only
-podman-compose logs -f n8n
-
-# View PostgreSQL logs only
-podman-compose logs -f postgres
-
-# Restart all services
-podman-compose restart
-
-# Restart n8n only
-podman-compose restart n8n
-
-# Check container status
-podman-compose ps
-
-# View resolved configuration
-podman-compose config
+scripts/backup.sh                     # hot: DB dump, roles, n8n_n8n_data, secrets, units
+scripts/backup.sh --cold              # also stops the stack and exports n8n_postgres_data
+scripts/restore.sh ~/backups/n8n/<timestamp> [--yes]
 ```
 
-## Backup & Restore
+A backup directory is mode 0700 and carries `SHA256SUMS`, which `restore.sh` verifies. It
+contains the **credentials encryption key** (`n8n_n8n_data`) and the database password: store
+copies off this host, and treat them like the credentials themselves. Without the encryption
+key the credentials in a restored database cannot be decrypted.
 
-### Backup PostgreSQL
+A nightly backup, as the service user:
 
 ```bash
-podman exec n8n-postgres pg_dump -U n8n n8n > backup_$(date +%Y%m%d_%H%M%S).sql
+systemd-run --user --on-calendar='*-*-* 03:30:00' --unit=n8n-backup \
+  ~/woow-quadlet/Woow_podman_n8n/scripts/backup.sh
 ```
 
-### Restore PostgreSQL
+## Uninstall
 
 ```bash
-podman exec -i n8n-postgres psql -U n8n n8n < backup_YYYYMMDD_HHMMSS.sql
+scripts/uninstall.sh                  # stops and removes the units; keeps all data
+scripts/uninstall.sh --purge --yes    # also deletes the volumes, network and secrets
 ```
 
-### Backup n8n data volume
+`--purge` is the only way this repo deletes data, and it exports both volumes and the secrets
+to `~/backups/n8n/purge-<timestamp>/` first. `~/.config/n8n/n8n.env` is always kept.
+
+## Migrating an existing compose or podman-compose deployment
+
+`scripts/migrate-legacy.sh` adopts the existing volumes (`n8n_n8n_data`, `n8n_postgres_data`)
+and the network `n8n-network` in place — no data is copied — and keeps the old containers and
+unit for rollback. Downtime is 2-3 minutes.
 
 ```bash
-podman volume export n8n_n8n_data > n8n_data_backup_$(date +%Y%m%d_%H%M%S).tar
+# 1. check and prepare while the old stack keeps running (no downtime)
+scripts/migrate-legacy.sh --legacy-dir ~/podman/Woow_podman_n8n --dry-run
+scripts/migrate-legacy.sh --legacy-dir ~/podman/Woow_podman_n8n \
+    --public-url https://n8n.example.com/ --prepare-only
+
+# 2. cutover (downtime starts): stop, cold export, rename, install, smoke
+scripts/migrate-legacy.sh --legacy-dir ~/podman/Woow_podman_n8n \
+    --public-url https://n8n.example.com/ --yes
+
+# 3. if anything is wrong (about 1 minute, no data loss)
+scripts/migrate-legacy.sh --rollback --yes
 ```
 
-### Restore n8n data volume
+What it does: checks that the legacy containers run the version this repo pins, that the
+volumes carry the expected names and that `podman-restart.service` is disabled; writes
+`~/.config/n8n/n8n.env` from the legacy `.env`; creates `n8n-db-password` from the legacy
+`POSTGRES_PASSWORD`; takes a hot dump and, after the stop, a cold export of both volumes;
+disables `podman-n8n.service` (the file stays on disk); renames the containers to
+`<name>-legacy-YYYYMMDD`; installs; and compares the workflow, credential and user counts. A
+failed cutover rolls back automatically (`--no-auto-rollback` keeps it for inspection).
+
+Changes the migration makes on purpose: the publish moves from `0.0.0.0` to `127.0.0.1`
+(`--bind` overrides), secure cookies stay on, `WEBHOOK_URL` becomes `N8N_WEBHOOK_URL`, and the
+task runners move out of the n8n process.
+
+**After the soak period** (a week, including one reboot):
 
 ```bash
-podman volume import n8n_n8n_data n8n_data_backup_YYYYMMDD_HHMMSS.tar
+podman rm n8n-legacy-YYYYMMDD n8n-postgres-legacy-YYYYMMDD
+rm ~/.config/systemd/user/podman-n8n.service && systemctl --user daemon-reload
+podman untag docker.io/n8nio/n8n:latest docker.io/library/postgres:16-alpine
 ```
-
-## Update n8n
-
-```bash
-# Pull latest image
-podman-compose pull n8n
-
-# Recreate container with new image
-podman-compose up -d
-```
-
-## Cloudflare Tunnel Integration
-
-When using Cloudflare Tunnel for external access, update `.env`:
-
-```bash
-WEBHOOK_URL=https://n8n.yourdomain.com/
-```
-
-No other changes needed - the tunnel connects to `http://localhost:15678` internally.
 
 ## Troubleshooting
 
-### Cannot login via HTTP (secure cookie error)
+| Symptom | Cause and fix |
+|---|---|
+| `Unit n8n.service not found` | the generator rejected a file. Run `tests/dryrun.sh`, then `systemctl --user daemon-reload` |
+| install refuses: *legacy container* | a non-Quadlet container owns the name. Quadlet's `--replace` would delete it: rename it (the message prints the command) or use `migrate-legacy.sh` |
+| login loop, "secure cookie" warning | you reach n8n over plain http from another machine. Use the public https URL, or set `N8N_SECURE_COOKIE=false` (not recommended) |
+| webhooks point at the wrong host | set the public URL: `scripts/install.sh --public-url https://…/` |
+| `Python 3 is missing` in the log | internal runner mode; set `N8N_RUNNERS_MODE=external` and re-run `install.sh` |
+| the stack does not come back after a reboot | linger is off: `sudo loginctl enable-linger $USER` |
 
-Ensure `N8N_SECURE_COOKIE=false` is set in `docker-compose.yml` under n8n environment.
+## Docker Compose
 
-### n8n container keeps restarting
-
-```bash
-# Check PostgreSQL health
-podman-compose logs postgres
-
-# Check n8n error logs
-podman-compose logs n8n
-```
-
-### Port conflict
-
-If port 15678 is already in use, change `N8N_PORT` in `.env`:
+This repository is Quadlet-only. The last revision with `docker-compose.yml` is tagged
+[`compose-final`](https://github.com/WOOWTECH/Woow_podman_n8n/tree/compose-final):
 
 ```bash
-N8N_PORT=25678
+git clone --branch compose-final https://github.com/WOOWTECH/Woow_podman_n8n
 ```
 
-Then restart: `podman-compose down && podman-compose up -d`
-
-### Cannot connect from other devices on the network
-
-Verify `N8N_HOST=0.0.0.0` in `.env` and check firewall rules:
-
-```bash
-# Check if port is open
-ss -tlnp | grep 15678
-```
-
----
-
-## AI Quick Deploy
-
-> This section is designed for AI assistants to quickly deploy n8n from this repository.
-
-### Prerequisites
-
-```bash
-podman --version && podman-compose --version
-```
-
-### Deploy
-
-```bash
-git clone https://github.com/WOOWTECH/Woow_podman_n8n.git
-cd Woow_podman_n8n
-cp .env.example .env
-# Update WEBHOOK_URL with actual server IP
-SERVER_IP=$(hostname -I | awk '{print $1}')
-sed -i "s|WEBHOOK_URL=http://localhost:15678/|WEBHOOK_URL=http://${SERVER_IP}:15678/|" .env
-podman-compose up -d
-```
-
-### Verify
-
-```bash
-sleep 10 && podman-compose ps && curl -s http://localhost:15678/healthz
-```
-
-### Teardown
-
-```bash
-# Keep data
-podman-compose down
-
-# Delete everything including data
-podman-compose down -v
-```
-
-### Configuration Reference
-
-| Item | Value |
-|------|-------|
-| n8n URL | `http://<SERVER_IP>:15678` |
-| Database | PostgreSQL 16 (internal port 5432) |
-| Auth | n8n built-in (first user = admin) |
-| HTTP Login | Enabled (`N8N_SECURE_COOKIE=false`) |
-| Data | Named volumes (`postgres_data`, `n8n_data`) |
-| Auto-restart | `unless-stopped` |
-| Network | `n8n-network` |
-
----
+New Docker deployments should follow n8n's own
+[Docker Compose guide](https://docs.n8n.io/hosting/installation/server-setups/docker-compose/).
 
 ## Other deployment platforms
 
-- **K3s/Kubernetes (Helm chart)** → [Woow_k3s_n8n](https://github.com/WOOWTECH/Woow_k3s_n8n)
+- **K3s / Kubernetes (Helm chart)** → [Woow_k3s_n8n](https://github.com/WOOWTECH/Woow_k3s_n8n)
 - **Home Assistant add-on** → [Woow_ha_n8n](https://github.com/WOOWTECH/Woow_ha_n8n)
-
