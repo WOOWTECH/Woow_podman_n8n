@@ -1,0 +1,35 @@
+# n8n-postgres.container: PostgreSQL 16 for n8n.
+# n8n 2.38 logs "Postgres 16 is outside the supported range"; moving to 17 is a
+# separate dump/restore change, not part of the Quadlet conversion.
+# Password: podman secret n8n-db-password (initdb reads it only on an empty volume).
+[Unit]
+Description=n8n PostgreSQL
+Documentation=https://github.com/WOOWTECH/Woow_podman_n8n
+PartOf=n8n.target
+
+[Container]
+ContainerName=n8n-postgres
+Image=docker.io/library/postgres:16.15-alpine
+Network=n8n.network
+Volume=n8n-postgres-data.volume:/var/lib/postgresql/data
+Environment=POSTGRES_USER=n8n
+Environment=POSTGRES_DB=n8n
+Secret=n8n-db-password,type=env,target=POSTGRES_PASSWORD
+Label=io.woowtech.app=n8n
+LogDriver=journald
+HealthCmd=pg_isready -U n8n -d n8n
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=5
+HealthStartPeriod=60s
+# Quadlet 4.9.3 has no StopTimeout= key; the generated ExecStop (podman rm -f) honours this.
+PodmanArgs=--stop-timeout=60
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=900
+TimeoutStopSec=90
+
+[Install]
+WantedBy=default.target
