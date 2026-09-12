@@ -206,9 +206,15 @@ app_write_checksums() {
     && mv -f SHA256SUMS.tmp SHA256SUMS) || ql_die "cannot write $1/SHA256SUMS"
 }
 
-# app_new_backup_dir [dir]: a fresh private directory (default ~/backups/n8n/<timestamp>)
+# app_new_backup_dir [dir]: a fresh private directory. Without an argument it is
+# ~/backups/n8n/<timestamp>, with -2, -3, ... when several backups land in the same second.
 app_new_backup_dir() {
-  local d=${1:-$BACKUP_ROOT/$(date +%Y%m%d-%H%M%S)}
+  local d=${1:-} base i=2
+  if [[ -z $d ]]; then
+    base=$BACKUP_ROOT/$(date +%Y%m%d-%H%M%S)
+    d=$base
+    while [[ -e $d ]]; do d=$base-$i; i=$((i + 1)); done
+  fi
   [[ ! -e $d ]] || ql_die "$d already exists"
   (umask 077 && mkdir -p -- "$d") || ql_die "cannot create $d"
   printf '%s' "$d"
