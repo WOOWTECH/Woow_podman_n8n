@@ -51,7 +51,7 @@ done
 if app_is_installed; then app_snapshot_units "$dest/units"; fi
 {
   printf 'n8n version: %s\n' "$(app_running_version)"
-  podman ps -a --filter label=io.woowtech.app=n8n --format '{{.Names}} {{.ImageName}} {{.ImageID}}' 2>/dev/null || true
+  podman ps -a --filter label=io.woowtech.app=n8n --format '{{.Names}} {{.Image}} {{.ImageID}}' 2>/dev/null || true
   for i in "$N8N_IMAGE" "$RUNNERS_IMAGE" "$PG_IMAGE"; do
     printf '%s %s\n' "$i" "$(podman image inspect --format '{{index .RepoDigests 0}}' "$i" 2>/dev/null || echo '?')"
   done
