@@ -35,7 +35,6 @@ while (($#)); do
 done
 ql_preflight "$PODMAN_MIN"
 ql_lock "$APP"
-export WOOW_QL_LOCK_HELD=$APP
 app_require_installed
 ql_env_load "$ENV_FILE"
 app_validate_env
@@ -93,7 +92,15 @@ if "$REPO/scripts/install.sh" --smoke-timeout 900; then
 fi
 
 # ---- 5. automatic rollback ---------------------------------------------------------------------
-trap 'rc=$?; ((rc == 0)) || ql_warn "ROLLBACK INCOMPLETE (rc=$rc). Backup: $bk. Restore by hand: scripts/restore.sh $bk"' EXIT
+# rollback_incomplete: say so if this script ends before the rollback below finishes.
+# A hook, not `trap ... EXIT`: a bare trap would replace the handler ql_lock armed and
+# leave the lock directory behind, so every later run would report a takeover.
+# shellcheck disable=SC2329 # invoked indirectly, as the ql_cleanup hook registered below
+rollback_incomplete() {
+  local rc=$?
+  ((rc == 0)) || ql_warn "ROLLBACK INCOMPLETE (rc=$rc). Backup: $bk. Restore by hand: scripts/restore.sh $bk"
+}
+ql_cleanup rollback rollback_incomplete
 ql_warn "upgrade to $tgt failed; rolling back to $cur"
 systemctl --user stop n8n-runners.service n8n.service || true
 ql_install_files "$bk/units" "$APP" --prune >/dev/null
@@ -107,6 +114,6 @@ mapfile -t units < <(app_units)
 ql_apply_units "$APP" "${units[@]}"
 app_env_record
 "$REPO/tests/smoke.sh" --timeout 600 || ql_die "the rolled-back stack failed its smoke test"
-trap - EXIT
+ql_cleanup_clear rollback
 ql_warn "rolled back to $cur; the upgrade to $tgt did not pass (backup: $bk)"
 exit 1

@@ -83,7 +83,6 @@ fi
 
 ql_preflight "$PODMAN_MIN"
 ql_lock "$APP"
-export WOOW_QL_LOCK_HELD=$APP
 
 unit_exists() { [[ -n $(systemctl --user show -p FragmentPath --value "$1" 2>/dev/null) ]]; }
 
@@ -210,7 +209,7 @@ derive_env() {
   fi
 }
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/$APP-migrate.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT
+ql_cleanup work rm -rf "$WORK"
 if [[ $mode == dry-run ]]; then
   if [[ -f $ENV_FILE ]]; then cp -p -- "$ENV_FILE" "$WORK/n8n.env"; else install -m 600 -- "$ENV_EXAMPLE" "$WORK/n8n.env"; fi
   derive_env "$WORK/n8n.env"

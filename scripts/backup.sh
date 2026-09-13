@@ -34,7 +34,7 @@ while (($#)); do
   shift
 done
 ql_require_rootless
-[[ ${WOOW_QL_LOCK_HELD:-} == "$APP" ]] || ql_lock "$APP"
+ql_lock "$APP"
 app_running "$DB_CONTAINER" || ql_die "$DB_CONTAINER is not running (start it: systemctl --user start $TARGET)"
 
 dest=$(app_new_backup_dir "$dest")
@@ -59,9 +59,12 @@ if app_is_installed; then app_snapshot_units "$dest/units"; fi
 
 # ---- cold part: PGDATA as bytes, with the whole stack stopped ------------------------------
 restart=0
+# restart_target: bring $TARGET back if this script ends between the stop and the start below.
+# A hook, not `trap ... EXIT`, which would replace the handler ql_lock armed.
+restart_target() { ((restart)) || return 0; systemctl --user start "$TARGET" || ql_warn "could not restart $TARGET"; }
 if ((cold)); then
   mapfile -t units < <(app_units)
-  trap 'if ((restart)); then systemctl --user start "$TARGET" || ql_warn "could not restart $TARGET"; fi' EXIT
+  ql_cleanup restart restart_target
   ql_info "stopping $TARGET for the cold export"
   restart=1
   systemctl --user stop "${units[@]}"
