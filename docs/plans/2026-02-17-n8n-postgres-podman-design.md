@@ -1,3 +1,8 @@
+> **Superseded (2026-09).** This document describes the original podman-compose design.
+> The deployment is now Quadlet + systemd (`quadlet/`, `systemd/`, `scripts/`); see README.md
+> and the `compose-final` tag for the last compose revision. Kept for the rationale behind
+> the port choice (15678), the named volumes and the Postgres backend.
+
 # n8n + PostgreSQL Podman 部署設計文件
 
 ## 概覽

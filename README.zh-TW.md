@@ -1,324 +1,224 @@
-# n8n + PostgreSQL Docker Compose (Podman)
+# n8n on rootless Podman（Quadlet + systemd）
 
-使用 Podman Compose 部署 [n8n](https://n8n.io/) 工作流程自動化平台，搭配 PostgreSQL 資料庫。
+以 **rootless Podman Quadlet unit** 部署 [n8n](https://n8n.io/)，搭配 PostgreSQL 與外部
+task runner，由使用者的 systemd 管理。unit 就是部署本身：開機自動啟動（需要 linger）、容器
+當掉時自動重啟，所有版本都釘選在這個 repo 裡。
 
-[English Version](README.md)
+[English version](README.md)
 
-## 架構圖
+## 架構
 
 ```
-┌──────────────────────────────────────────────────┐
-│          Cloudflare Tunnel（可選，外部存取）        │
-└─────────────────┬────────────────────────────────┘
-                  │
-                  ▼
-┌──────────────────────────────────────────────────┐
-│            Podman 網路 (n8n-network)              │
-│                                                  │
-│  ┌──────────────────┐    ┌────────────────────┐  │
-│  │       n8n        │    │   PostgreSQL 16     │  │
-│  │   (latest)       │───▶│    (Alpine)         │  │
-│  │  埠號: 15678     │    │  埠號: 5432（內部） │  │
-│  └────────┬─────────┘    └────────┬───────────┘  │
-│           │                       │              │
-│           ▼                       ▼              │
-│     n8n_data vol          postgres_data vol       │
-└──────────────────────────────────────────────────┘
+              systemctl --user start|stop|restart n8n.target
+                                  │
+   ┌──────────────────────────────┼───────────────────────────────┐
+   │                              │                               │
+n8n-postgres.service         n8n.service  ◀──Requires──  n8n-runners.service
+postgres:16.15-alpine        n8nio/n8n              n8nio/runners（選配）
+   │  volume                    │  volume                │
+   │  n8n_postgres_data         │  n8n_n8n_data          └── JS 與 Python Code 節點
+   └──────────────────── network n8n-network ──────────────────────┘
+                                  │
+                     PublishPort HOST_BIND:HOST_PORT -> 5678
+                     （預設 127.0.0.1:15678，對外由 Cloudflare
+                       Tunnel 或 NPM 負責）
 ```
 
-## 一鍵部署至 Portainer
+| 檔案 | unit | 內容 |
+|---|---|---|
+| `quadlet/n8n.network` | `n8n-network.service` | bridge 網路 `n8n-network` |
+| `quadlet/n8n-data.volume` | `n8n-data-volume.service` | volume `n8n_n8n_data`：**憑證加密金鑰** |
+| `quadlet/n8n-postgres-data.volume` | `n8n-postgres-data-volume.service` | volume `n8n_postgres_data`：PGDATA |
+| `quadlet/n8n-postgres.container` | `n8n-postgres.service` | PostgreSQL 16 |
+| `quadlet/n8n.container` | `n8n.service` | n8n（編輯器、REST API、webhook、task broker） |
+| `quadlet/optional/n8n-runners.container` | `n8n-runners.service` | 外部 task runner（預設安裝，`--no-runners` 可略過） |
+| `systemd/n8n.target` | `n8n.target` | 一次操作整個堆疊 |
 
-使用 Portainer 的 Stack 功能，可透過 GitHub Repository 網址快速部署本專案。
-
-[![Deploy to Portainer](https://img.shields.io/badge/Deploy_to-Portainer-13BEF9?style=for-the-badge&logo=portainer&logoColor=white)](#一鍵部署至-portainer)
-
-### 使用 Git Repository 部署（推薦）
-
-1. 登入你的 Portainer 管理介面
-2. 進入 **Stacks** → **Add stack**
-3. 選擇 **Repository**
-4. 填入以下資訊：
-
-   | 欄位 | 值 |
-   |------|-----|
-   | **Repository URL** | `https://github.com/WOOWTECH/Woow_podman_n8n` |
-   | **Repository reference** | `refs/heads/main` |
-   | **Compose path** | `docker-compose.yml` |
-
-5. 點擊 **Deploy the stack**
-
-### 使用 Web Editor 部署
-
-1. 複製 `docker-compose.yml` 的 Raw URL：
-
-   ```
-   https://raw.githubusercontent.com/WOOWTECH/Woow_podman_n8n/main/docker-compose.yml
-   ```
-
-2. 登入 Portainer → **Stacks** → **Add stack** → **Web editor**
-3. 使用 `curl` 或瀏覽器取得上述 URL 的內容，貼入編輯器
-4. 設定環境變數（參考 `.env`）
-5. 點擊 **Deploy the stack**
+安裝位置：`~/.config/containers/systemd/`（Quadlet）、`~/.config/systemd/user/`（target）、
+`~/.config/n8n/n8n.env`（設定，權限 0600）。密碼一律使用 podman secret，不放在 env 檔。
 
 ## 系統需求
 
-- Podman（v4.0+）
-- podman-compose（v1.0+）
+- Ubuntu 24.04 或同級系統，**podman >= 4.9.3** rootless，systemd 255 使用者 unit
+- 服務帳號啟用 linger（`sudo loginctl enable-linger $USER`），登出後服務才會繼續執行
+- 映像檔約需 1.5 GB 磁碟空間（n8n、runners、postgres）
 
 ```bash
-# 檢查版本
-podman --version
-podman-compose --version
+podman --version && systemctl --user show-environment >/dev/null && echo "user manager ok"
 ```
 
-## 專案結構
-
-```
-.
-├── docker-compose.yml    # 服務定義（n8n + PostgreSQL）
-├── .env.example          # 環境變數範本
-├── .env                  # 實際環境變數（已加入 gitignore）
-├── .gitignore            # Git 忽略規則
-├── README.md             # 英文說明文件
-├── README.zh-TW.md       # 中文說明文件（本檔案）
-└── docs/
-    ├── plans/
-    │   └── 2026-02-17-n8n-postgres-podman-design.md
-    └── skills/
-        └── deploy-n8n-postgres.md   # AI 部署技能檔
-```
-
-## 快速部署
-
-### 步驟一：複製儲存庫
+## 安裝
 
 ```bash
-git clone https://github.com/WOOWTECH/Woow_podman_n8n.git
-cd Woow_podman_n8n
+git clone https://github.com/WOOWTECH/Woow_podman_n8n ~/woow-quadlet/Woow_podman_n8n
+cd ~/woow-quadlet/Woow_podman_n8n
+tests/dryrun.sh                 # 選用：用本機產生器驗證所有 unit
+scripts/install.sh              # 第一次執行：建立 ~/.config/n8n/n8n.env 後停下
+$EDITOR ~/.config/n8n/n8n.env   # 設定 HOST_BIND/HOST_PORT、時區、公開網址
+scripts/install.sh              # 安裝、啟動並執行 smoke 測試
 ```
 
-### 步驟二：設定環境變數
+若前面有 Cloudflare Tunnel 或 Nginx Proxy Manager，請指定公開網址；n8n 會用它組出 webhook
+網址與 OAuth callback：
 
 ```bash
-cp .env.example .env
+scripts/install.sh --public-url https://n8n.example.com/
 ```
 
-編輯 `.env`，更新以下項目：
-- `POSTGRES_PASSWORD` - 設定安全的密碼
-- `WEBHOOK_URL` - 替換為伺服器 IP：`http://<伺服器IP>:15678/`
+第一個打開編輯器的人就會成為管理者。**請先加上驗證（Cloudflare Access、NPM），或立刻建立
+管理者帳號。**
 
-### 步驟三：啟動服務
+其他選項：`--no-runners`（改用內建 runner）、`--db-password-file F`（僅第一次安裝）、
+`--no-start`、`--no-smoke`、`--smoke-timeout S`、`--dry-run`（只驗證不改動）。
+
+## 設定
+
+`~/.config/n8n/n8n.env`，權限 0600，只能寫 `KEY=value`：不要加引號，也不要在值後面接
+`# 註解`。`HOST_*` 會在安裝時寫進 unit 檔（決策 D2），其餘的鍵會傳給 n8n 容器，因此任何
+[n8n 環境變數](https://docs.n8n.io/hosting/configuration/environment-variables/)都能在這裡設定。
+改完之後重新執行 `scripts/install.sh`，它只會重啟有變動的部分。
+
+| 鍵 | 預設 | 說明 |
+|---|---|---|
+| `HOST_BIND` | `127.0.0.1` | 發布位址，`0.0.0.0` 代表對所有網卡開放 |
+| `HOST_PORT` | `15678` | 對外埠號（容器內 n8n 固定聽 5678） |
+| `N8N_HOST`、`N8N_PROTOCOL` | `localhost`、`http` | n8n 認為自己被存取的主機與協定 |
+| `N8N_EDITOR_BASE_URL`、`N8N_WEBHOOK_URL` | 未設定 | 公開網址（`--public-url` 會寫入） |
+| `N8N_PROXY_HOPS` | 未設定 | 前方的 proxy 層數（Tunnel 或 NPM 為 1） |
+| `GENERIC_TIMEZONE`、`TZ` | `Asia/Taipei` | 排程與日誌時區 |
+| `N8N_RUNNERS_MODE` | `external` | `external` 會安裝 sidecar，`internal` 則在 n8n 內執行程式碼 |
+
+請勿設定 `N8N_PORT`（那是容器內的埠號）或 `DB_POSTGRESDB_*`，這些由 unit 決定；
+`install.sh` 會對被忽略的鍵提出警告。
+
+**Secret**（podman secret，第一次安裝時建立，永不列印）：
+
+| Secret | 用途 |
+|---|---|
+| `n8n-db-password` | `POSTGRES_PASSWORD`（initdb）與 `DB_POSTGRESDB_PASSWORD` |
+| `n8n-runners-auth-token` | n8n 與 runner 共用；即使是 internal 模式也必須存在 |
+
+**Task runner**：外部 runner 會把 Code 節點的 JavaScript 與 Python 放到獨立容器執行，這也是
+上游的建議做法；internal 模式下，能編輯工作流程的人就能讀到加密金鑰與所有憑證。
+`n8nio/n8n` 與 `n8nio/runners` 版本必須一致，`tests/dryrun.sh` 與 `scripts/upgrade.sh` 會強制檢查。
+
+## 日常操作
 
 ```bash
-podman-compose up -d
+systemctl --user status n8n.service              # 單一 unit
+systemctl --user restart n8n.target              # 整個堆疊
+journalctl --user -u n8n.service -f              # 日誌（LogDriver=journald）
+podman exec n8n n8n --version
+tests/smoke.sh                                   # 健康檢查，不會改動任何東西
+tests/smoke.sh --public-url https://n8n.example.com/
 ```
 
-### 步驟四：驗證部署
+## 升級
+
+repo 是版本的唯一來源：同時修改 `quadlet/n8n.container` 與
+`quadlet/optional/n8n-runners.container` 的 `Image=`（版本要一致），commit 之後執行：
 
 ```bash
-# 檢查容器狀態
-podman-compose ps
-
-# 健康檢查
-curl -s http://localhost:15678/healthz
-# 預期回應：{"status":"ok"}
+git pull
+scripts/upgrade.sh              # 跨大版本（2.x -> 3.x）需要 --allow-major
 ```
 
-### 步驟五：存取 n8n
+它會拒絕降版、n8n 與 runner 版本不一致、以及 Postgres 大版本變動；在停止任何服務之前先拉取
+映像檔；備份、重啟、以 900 秒逾時執行 smoke 測試；失敗時自動還原舊 unit 並回復升級前的資料庫
+（n8n 的 migration 只能往前）。
 
-在瀏覽器開啟 `http://<伺服器IP>:15678`
-
-第一個註冊的使用者會自動成為**管理員**。
-
-## 環境變數
-
-| 變數 | 說明 | 預設值 |
-|------|------|--------|
-| `POSTGRES_USER` | PostgreSQL 使用者名稱 | `n8n` |
-| `POSTGRES_PASSWORD` | PostgreSQL 密碼 | *（在 .env 中設定）* |
-| `POSTGRES_DB` | 資料庫名稱 | `n8n` |
-| `N8N_PORT` | n8n 對外埠號 | `15678` |
-| `N8N_HOST` | n8n 綁定位址 | `0.0.0.0` |
-| `N8N_PROTOCOL` | 協定（http/https） | `http` |
-| `WEBHOOK_URL` | Webhook 回呼網址 | `http://localhost:15678/` |
-| `GENERIC_TIMEZONE` | 時區 | `Asia/Taipei` |
-
-### 重要設定說明
-
-- **`N8N_SECURE_COOKIE=false`** 已在 `docker-compose.yml` 中設定，允許透過 HTTP 登入內網。若使用 HTTPS（如 Cloudflare Tunnel），可移除此設定。
-- **`N8N_HOST=0.0.0.0`** 允許網路上任何 IP 連線，不僅限 localhost。
-- **埠號 15678** 用於避免與其他服務衝突。
-
-## 常用指令
-
-```bash
-# 啟動服務（背景執行）
-podman-compose up -d
-
-# 停止服務（保留資料）
-podman-compose down
-
-# 停止服務並刪除所有資料
-podman-compose down -v
-
-# 查看所有日誌
-podman-compose logs -f
-
-# 只查看 n8n 日誌
-podman-compose logs -f n8n
-
-# 只查看 PostgreSQL 日誌
-podman-compose logs -f postgres
-
-# 重啟所有服務
-podman-compose restart
-
-# 只重啟 n8n
-podman-compose restart n8n
-
-# 檢查容器狀態
-podman-compose ps
-
-# 查看解析後的設定
-podman-compose config
-```
+**Postgres 大版本升級**（16 -> 17）屬於獨立作業：`scripts/backup.sh --cold`、修改映像檔版本、
+刪除 volume `n8n_postgres_data`、`scripts/install.sh`，最後 `scripts/restore.sh`。
 
 ## 備份與還原
 
-### 備份 PostgreSQL
-
 ```bash
-podman exec n8n-postgres pg_dump -U n8n n8n > backup_$(date +%Y%m%d_%H%M%S).sql
+scripts/backup.sh                     # 熱備份：資料庫 dump、角色、n8n_n8n_data、secret、unit
+scripts/backup.sh --cold              # 另外停止服務並匯出 n8n_postgres_data
+scripts/restore.sh ~/backups/n8n/<timestamp> [--yes]
 ```
 
-### 還原 PostgreSQL
+備份目錄權限為 0700 並附上 `SHA256SUMS`，`restore.sh` 會先驗證。裡面含有**憑證加密金鑰**
+（`n8n_n8n_data`）與資料庫密碼：請另存到本機以外的地方，並比照憑證本身保護。沒有加密金鑰，
+還原後的資料庫裡的憑證也無法解密。
+
+每日備份（以服務帳號執行）：
 
 ```bash
-podman exec -i n8n-postgres psql -U n8n n8n < backup_YYYYMMDD_HHMMSS.sql
+systemd-run --user --on-calendar='*-*-* 03:30:00' --unit=n8n-backup \
+  ~/woow-quadlet/Woow_podman_n8n/scripts/backup.sh
 ```
 
-### 備份 n8n 資料 volume
+## 移除
 
 ```bash
-podman volume export n8n_n8n_data > n8n_data_backup_$(date +%Y%m%d_%H%M%S).tar
+scripts/uninstall.sh                  # 停止並移除 unit，資料全部保留
+scripts/uninstall.sh --purge --yes    # 另外刪除 volume、網路與 secret
 ```
 
-### 還原 n8n 資料 volume
+`--purge` 是本 repo 唯一會刪除資料的方式，而且會先把兩個 volume 與 secret 匯出到
+`~/backups/n8n/purge-<timestamp>/`。`~/.config/n8n/n8n.env` 永遠保留。
+
+## 從既有 compose / podman-compose 部署遷移
+
+`scripts/migrate-legacy.sh` 會就地沿用既有的 volume（`n8n_n8n_data`、`n8n_postgres_data`）
+與網路 `n8n-network`（不搬移資料），並保留舊容器與舊 unit 以便回滾，停機約 2-3 分鐘。
 
 ```bash
-podman volume import n8n_n8n_data n8n_data_backup_YYYYMMDD_HHMMSS.tar
+# 1. 舊堆疊繼續運作時先檢查與準備（不停機）
+scripts/migrate-legacy.sh --legacy-dir ~/podman/Woow_podman_n8n --dry-run
+scripts/migrate-legacy.sh --legacy-dir ~/podman/Woow_podman_n8n \
+    --public-url https://n8n.example.com/ --prepare-only
+
+# 2. 切換（開始停機）：停止、冷備份、改名、安裝、smoke
+scripts/migrate-legacy.sh --legacy-dir ~/podman/Woow_podman_n8n \
+    --public-url https://n8n.example.com/ --yes
+
+# 3. 有問題時回滾（約 1 分鐘，不會遺失資料）
+scripts/migrate-legacy.sh --rollback --yes
 ```
 
-## 更新 n8n
+它會：確認舊容器執行的版本與本 repo 釘選的版本相同、volume 名稱符合、
+`podman-restart.service` 未啟用；用舊 `.env` 產生 `~/.config/n8n/n8n.env`；用舊的
+`POSTGRES_PASSWORD` 建立 `n8n-db-password`；先做熱備份，停止後再冷匯出兩個 volume；停用
+`podman-n8n.service`（檔案保留）；把容器改名為 `<name>-legacy-YYYYMMDD`；安裝新 unit；
+最後比對工作流程、憑證與使用者數量。切換失敗會自動回滾（`--no-auto-rollback` 可保留現場）。
+
+遷移刻意造成的變更：發布位址由 `0.0.0.0` 改為 `127.0.0.1`（可用 `--bind` 覆寫）、維持啟用
+secure cookie、`WEBHOOK_URL` 改為 `N8N_WEBHOOK_URL`，以及 task runner 移出 n8n 行程。
+
+**觀察期結束後**（約一週，含一次重開機）：
 
 ```bash
-# 拉取最新映像
-podman-compose pull n8n
-
-# 用新映像重建容器
-podman-compose up -d
+podman rm n8n-legacy-YYYYMMDD n8n-postgres-legacy-YYYYMMDD
+rm ~/.config/systemd/user/podman-n8n.service && systemctl --user daemon-reload
+podman untag docker.io/n8nio/n8n:latest docker.io/library/postgres:16-alpine
 ```
-
-## Cloudflare Tunnel 整合
-
-使用 Cloudflare Tunnel 進行外部存取時，更新 `.env`：
-
-```bash
-WEBHOOK_URL=https://n8n.yourdomain.com/
-```
-
-無需其他修改 — Tunnel 在內部連接到 `http://localhost:15678`。
 
 ## 疑難排解
 
-### 無法透過 HTTP 登入（secure cookie 錯誤）
+| 現象 | 原因與處理 |
+|---|---|
+| `Unit n8n.service not found` | 產生器拒絕了某個檔案。執行 `tests/dryrun.sh`，再 `systemctl --user daemon-reload` |
+| 安裝被擋下並顯示 legacy container | 同名容器不是 Quadlet 建立的。Quadlet 的 `--replace` 會刪掉它：依訊息指示改名，或改用 `migrate-legacy.sh` |
+| 登入一直跳回、出現 secure cookie 警告 | 你從其他機器用純 http 存取。請改用公開的 https 網址，或設定 `N8N_SECURE_COOKIE=false`（不建議） |
+| webhook 指向錯誤的主機 | 設定公開網址：`scripts/install.sh --public-url https://…/` |
+| 日誌出現 `Python 3 is missing` | 目前是 internal runner 模式：設定 `N8N_RUNNERS_MODE=external` 後重新執行 `install.sh` |
+| 重開機後服務沒有回來 | linger 沒開：`sudo loginctl enable-linger $USER` |
 
-確認 `docker-compose.yml` 的 n8n 環境變數中已設定 `N8N_SECURE_COOKIE=false`。
+## Docker Compose
 
-### n8n 容器持續重啟
-
-```bash
-# 檢查 PostgreSQL 健康狀態
-podman-compose logs postgres
-
-# 檢查 n8n 錯誤日誌
-podman-compose logs n8n
-```
-
-### 埠號衝突
-
-如果 15678 已被佔用，在 `.env` 中修改 `N8N_PORT`：
+本 repo 只保留 Quadlet 部署。最後一個含 `docker-compose.yml` 的版本標記為
+[`compose-final`](https://github.com/WOOWTECH/Woow_podman_n8n/tree/compose-final)：
 
 ```bash
-N8N_PORT=25678
+git clone --branch compose-final https://github.com/WOOWTECH/Woow_podman_n8n
 ```
 
-然後重啟：`podman-compose down && podman-compose up -d`
-
-### 無法從其他裝置連線
-
-確認 `.env` 中 `N8N_HOST=0.0.0.0`，並檢查防火牆規則：
-
-```bash
-# 檢查埠號是否開放
-ss -tlnp | grep 15678
-```
-
----
-
-## AI 快速部署
-
-> 此區塊專為 AI 助手快速部署 n8n 設計。
-
-### 前置檢查
-
-```bash
-podman --version && podman-compose --version
-```
-
-### 部署
-
-```bash
-git clone https://github.com/WOOWTECH/Woow_podman_n8n.git
-cd Woow_podman_n8n
-cp .env.example .env
-# 自動替換 WEBHOOK_URL 為實際伺服器 IP
-SERVER_IP=$(hostname -I | awk '{print $1}')
-sed -i "s|WEBHOOK_URL=http://localhost:15678/|WEBHOOK_URL=http://${SERVER_IP}:15678/|" .env
-podman-compose up -d
-```
-
-### 驗證
-
-```bash
-sleep 10 && podman-compose ps && curl -s http://localhost:15678/healthz
-```
-
-### 移除
-
-```bash
-# 保留資料
-podman-compose down
-
-# 刪除所有資料
-podman-compose down -v
-```
-
-### 設定摘要
-
-| 項目 | 值 |
-|------|-----|
-| n8n 網址 | `http://<伺服器IP>:15678` |
-| 資料庫 | PostgreSQL 16（內部埠號 5432） |
-| 認證 | n8n 內建帳號（第一位使用者 = 管理員） |
-| HTTP 登入 | 已啟用（`N8N_SECURE_COOKIE=false`） |
-| 資料儲存 | Named volumes（`postgres_data`、`n8n_data`） |
-| 自動重啟 | `unless-stopped` |
-| 網路 | `n8n-network` |
-
----
+全新的 Docker 部署建議直接參考 n8n 官方的
+[Docker Compose 指南](https://docs.n8n.io/hosting/installation/server-setups/docker-compose/)。
 
 ## 其他部署平台
 
-- **K3s/Kubernetes(Helm chart)** → [Woow_k3s_n8n](https://github.com/WOOWTECH/Woow_k3s_n8n)
+- **K3s / Kubernetes（Helm chart）** → [Woow_k3s_n8n](https://github.com/WOOWTECH/Woow_k3s_n8n)
 - **Home Assistant add-on** → [Woow_ha_n8n](https://github.com/WOOWTECH/Woow_ha_n8n)
