@@ -176,7 +176,7 @@ scripts/migrate-legacy.sh --legacy-dir ~/podman/Woow_podman_n8n --dry-run
 scripts/migrate-legacy.sh --legacy-dir ~/podman/Woow_podman_n8n \
     --public-url https://n8n.example.com/ --prepare-only
 
-# 2. cutover (downtime starts): stop, cold export, rename, install, smoke
+# 2. cutover (downtime starts): stop, cold export, retire the legacy containers, install, smoke
 scripts/migrate-legacy.sh --legacy-dir ~/podman/Woow_podman_n8n \
     --public-url https://n8n.example.com/ --yes
 
@@ -184,13 +184,42 @@ scripts/migrate-legacy.sh --legacy-dir ~/podman/Woow_podman_n8n \
 scripts/migrate-legacy.sh --rollback --yes
 ```
 
-What it does: checks that the legacy containers run the version this repo pins, that the
-volumes carry the expected names and that `podman-restart.service` is disabled; writes
-`~/.config/n8n/n8n.env` from the legacy `.env`; creates `n8n-db-password` from the legacy
-`POSTGRES_PASSWORD`; takes a hot dump and, after the stop, a cold export of both volumes;
-disables `podman-n8n.service` (the file stays on disk); renames the containers to
-`<name>-legacy-YYYYMMDD`; installs; and compares the workflow, credential and user counts. A
-failed cutover rolls back automatically (`--no-auto-rollback` keeps it for inspection).
+What it does: checks that the legacy containers run the version this repo pins and that the
+volumes carry the expected names; writes `~/.config/n8n/n8n.env` from the legacy `.env`;
+creates `n8n-db-password` from the legacy `POSTGRES_PASSWORD`; takes a hot dump and, after the
+stop, a cold export of both volumes; disables `podman-n8n.service` (the file stays on disk);
+retires the legacy containers (see below); installs; and compares the workflow, credential and
+user counts. A failed cutover rolls back automatically (`--no-auto-rollback` keeps it for
+inspection).
+
+### How the legacy containers are kept for rollback
+
+Renaming a legacy container and leaving it stopped is a rollback path only while nothing
+starts it again. The user unit `podman-restart.service` runs
+`podman start --all --filter restart-policy=always` at boot, so on a host where that unit is
+**enabled** a renamed, stopped container whose restart policy is exactly `always` revives at
+the next boot and fights the new Quadlet container for its name, ports and volumes. podman
+4.9.3 cannot repair that afterwards: `podman update` only rewrites cgroup limits, and a
+restart policy is fixed at create time.
+
+The script therefore asks `ql_rollback_strategy` — which reads this host's real state, never
+its name — and takes one of two paths. `--dry-run` prints which one applies here.
+
+| Answer | When | What the cutover does | What `--rollback` does |
+|---|---|---|---|
+| `rename` | the unit is disabled, or no legacy container has policy `always` | `podman rename <name> <name>-legacy-YYYYMMDD`, left stopped | renames it back |
+| `capture` | the unit is enabled **and** a legacy container has policy `always` | writes `<backup>/legacy-container/<name>/` (inspect, create command, image, policy, mounts, networks) and then a plain `podman rm` — never `podman rm -v`, which would delete the anonymous volumes | `ql_recreate_container` recreates it stopped, with its original restart policy |
+
+n8n's two containers are `unless-stopped` on both WOOWTECH hosts, so in practice both take the
+`rename` path; the earlier blanket refusal to run at all while `podman-restart.service` was
+enabled blocked a migration that is in fact safe.
+
+The capture cannot bring back a container's **writable layer** — anything written inside the
+container that did not land in a volume or a bind mount. n8n keeps its data in
+`n8n_n8n_data` (`/home/node/.n8n`), and its writable layer on the live hosts holds nothing but
+a symlink, so nothing is lost. (`ql_capture_container --commit` exists for a stack that
+mutates its own container; n8n does not need it.) The container id and the IP/MAC lease are
+not preserved either. `tests/rollback-model.sh` pins both paths.
 
 Changes the migration makes on purpose: the publish moves from `0.0.0.0` to `127.0.0.1`
 (`--bind` overrides), secure cookies stay on, `WEBHOOK_URL` becomes `N8N_WEBHOOK_URL`, and the
@@ -199,7 +228,7 @@ task runners move out of the n8n process.
 **After the soak period** (a week, including one reboot):
 
 ```bash
-podman rm n8n-legacy-YYYYMMDD n8n-postgres-legacy-YYYYMMDD
+podman rm n8n-legacy-YYYYMMDD n8n-postgres-legacy-YYYYMMDD   # rename path only
 rm ~/.config/systemd/user/podman-n8n.service && systemctl --user daemon-reload
 podman untag docker.io/n8nio/n8n:latest docker.io/library/postgres:16-alpine
 ```
