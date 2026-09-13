@@ -14,15 +14,24 @@
 #   --public-url URL    the tunnel/NPM URL (sets N8N_EDITOR_BASE_URL, N8N_WEBHOOK_URL, ...).
 #                       Without it the legacy WEBHOOK_URL is carried over as N8N_WEBHOOK_URL.
 #   --bind ADDR         HOST_BIND of the new publish (default 127.0.0.1; compose used 0.0.0.0)
-#   --suffix S          the legacy containers become <name>-legacy-S (default: today)
+#   --suffix S          the legacy containers become <name>-legacy-S (default: today). Only
+#                       used on the rename path; see "Rollback shape" below.
 #   --prepare-only      steps 1-2 only, no downtime: checks, env file, secrets, images, hot backup
 #   --dry-run           step 1 and a render of the units; changes nothing
 #   --no-auto-rollback  leave a failed cutover in place for inspection
-#   --rollback          undo the cutover: remove the Quadlet units, rename the legacy containers
+#   --rollback          undo the cutover: remove the Quadlet units, bring the legacy containers
 #                       back, re-enable the legacy unit. Volumes are shared, so no data is lost.
 #
+# Rollback shape (STANDARD 7a): the legacy containers are kept for --rollback either by
+# renaming them and leaving them stopped, or - where the user unit podman-restart.service is
+# enabled and a legacy container's restart policy is exactly `always`, because a renamed copy
+# would revive at the next boot and fight the new Quadlet container - by capturing them into
+# the backup directory and removing them. ql_rollback_strategy decides from this host's real
+# state, never from its name, and --dry-run reports which path a cutover would take. The
+# capture is taken in step 2, before any downtime.
+#
 # Steps:  1 pre-flight checks        2 backup (hot pg_dump now, cold volume export after the stop)
-#         3 disable the legacy unit (kept on disk) and rename the legacy containers
+#         3 disable the legacy unit (kept on disk) and retire the legacy containers
 #         4 scripts/install.sh adopts n8n_n8n_data, n8n_postgres_data and n8n-network
 #         5 tests/smoke.sh           6 --rollback when needed
 # shellcheck source-path=SCRIPTDIR
@@ -50,7 +59,7 @@ while (($#)); do
     --rollback) mode=rollback ;;
     --status) mode=status ;;
     --yes) ASSUME_YES=1 ;;
-    -h | --help) sed -n '2,29p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,36p' "$0"; exit 0 ;;
     *) ql_die "unknown option $1 (see --help)" ;;
   esac
   shift
@@ -82,10 +91,10 @@ unit_exists() { [[ -n $(systemctl --user show -p FragmentPath --value "$1" 2>/de
 # 6. rollback
 # =============================================================================================
 rollback() {
-  local status sfx c port unit_state
-  status=$(state_get STATUS) sfx=$(state_get SUFFIX)
+  local status sfx c port unit_state bk
+  status=$(state_get STATUS) sfx=$(state_get SUFFIX) bk=$(state_get BACKUP)
   [[ $status == cutover || $status == "done" ]] || ql_die "nothing to roll back (migration status: ${status:-none})"
-  app_confirm "--rollback removes the n8n Quadlet units and brings back the legacy containers *-legacy-$sfx"
+  app_confirm "--rollback removes the n8n Quadlet units and brings the legacy containers back"
   ql_info "stopping and removing the Quadlet units (volumes, network and secrets are kept)"
   ql_uninstall_units "$APP"
   rm -f -- "$APP_STATE_DIR/env.sha256"
@@ -95,10 +104,9 @@ rollback() {
         || ql_die "container $c exists and is not a Quadlet leftover; resolve it by hand"
       podman rm -f "$c" >/dev/null
     fi
-    podman container exists "$c-legacy-$sfx" || ql_die "legacy container $c-legacy-$sfx is missing"
-    podman rename "$c-legacy-$sfx" "$c"
-    ql_info "renamed $c-legacy-$sfx -> $c"
   done
+  # renamed back, or recreated from the capture the cutover took - whichever the host needed
+  app_legacy_restore "$sfx" "$bk" "${LEGACY_CONTAINERS[@]}"
   unit_state=$(state_get LEGACY_UNIT_STATE)
   if unit_exists "$LEGACY_UNIT"; then
     if [[ $unit_state == enabled ]]; then systemctl --user enable "$LEGACY_UNIT" >/dev/null 2>&1; fi
@@ -139,15 +147,20 @@ case $(state_get STATUS) in
   cutover | "done") ql_die "a cutover is already recorded in $STATE (use --status, or --rollback)" ;;
 esac
 if [[ $mode == dry-run ]]; then QL_DRY_RUN=1 ql_enable_linger; else ql_enable_linger; fi
-[[ $(systemctl --user is-enabled podman-restart.service 2>/dev/null || true) != enabled ]] \
-  || ql_die "podman-restart.service is enabled: at boot it would start the renamed legacy containers next to the new ones. Disable it first"
 for c in "${LEGACY_CONTAINERS[@]}"; do
   podman container exists "$c" || ql_die "legacy container $c not found"
   label=$(podman inspect --format '{{index .Config.Labels "PODMAN_SYSTEMD_UNIT"}}' "$c")
   [[ $label != "$c.service" ]] || ql_die "$c is already managed by Quadlet ($label)"
   app_running "$c" || ql_die "legacy container $c is not running; start the legacy stack for the hot backup"
-  if podman container exists "$c-legacy-$suffix"; then ql_die "$c-legacy-$suffix already exists; pick another --suffix"; fi
 done
+# How the legacy containers are kept for --rollback: renamed and left stopped, or captured
+# and removed. Asked of this host, never of its name (STANDARD 7a, quadlet-lib >= 1.4.0).
+STRATEGY=$(ql_rollback_strategy "${LEGACY_CONTAINERS[@]}")
+if [[ $STRATEGY == rename ]]; then
+  for c in "${LEGACY_CONTAINERS[@]}"; do
+    if podman container exists "$c-legacy-$suffix"; then ql_die "$c-legacy-$suffix already exists; pick another --suffix"; fi
+  done
+fi
 mounts_of() { podman inspect --format '{{range .Mounts}}{{.Name}}|{{.Destination}}{{println}}{{end}}' "$1"; }
 grep -qx "$DATA_VOLUME|/home/node/.n8n" < <(mounts_of n8n) \
   || ql_die "n8n does not use the volume $DATA_VOLUME at /home/node/.n8n; this repo only adopts that name"
@@ -204,7 +217,11 @@ if [[ $mode == dry-run ]]; then
   ql_env_load "$WORK/n8n.env"
   app_validate_env
   app_render "$WORK/render" "$WORK/n8n.env"
-  ql_info "dry-run: checks passed and the units render. The cutover would stop $LEGACY_UNIT, rename ${LEGACY_CONTAINERS[*]} to *-legacy-$suffix and install:"
+  if [[ $STRATEGY == capture ]]; then
+    ql_info "dry-run: checks passed and the units render. The cutover would stop $LEGACY_UNIT, capture ${LEGACY_CONTAINERS[*]} into the backup directory and remove them (podman-restart.service would revive a renamed copy here), and install:"
+  else
+    ql_info "dry-run: checks passed and the units render. The cutover would stop $LEGACY_UNIT, rename ${LEGACY_CONTAINERS[*]} to *-legacy-$suffix and install:"
+  fi
   sed 's/^/    /' < <(grep -vE '^[[:space:]]*(#|$)' "$WORK/n8n.env") >&2
   exit 0
 fi
@@ -239,7 +256,11 @@ mkdir -p "$bk/secrets"
 for s in "$SECRET_DB" "$SECRET_RUNNERS"; do app_save_secret "$s" "$bk/secrets/$s"; done
 printf 'legacy n8n %s\n%s\n' "$cur" "$pre_counts" >"$bk/precheck.txt"
 podman exec n8n test -s /home/node/.n8n/config && echo "encryption key present" >>"$bk/precheck.txt"
+# On the capture path the rollback copy is written now, while the legacy stack still runs:
+# a container whose create command cannot be replayed is then refused before any downtime.
+if [[ $STRATEGY == capture ]]; then app_legacy_capture "$bk" "${LEGACY_CONTAINERS[@]}"; fi
 app_write_checksums "$bk"
+state_set STRATEGY "$STRATEGY"
 state_set STATUS prepared
 state_set BACKUP "$bk"
 state_set SUFFIX "$suffix"
@@ -254,7 +275,7 @@ fi
 # 3. stop + cold backup + rename (downtime starts)
 # =============================================================================================
 app_confirm "the cutover stops n8n (about 2-3 minutes of downtime)"
-ql_info "step 3/5: stopping the legacy stack, cold export, renaming the legacy containers"
+ql_info "step 3/5: stopping the legacy stack, cold export, retiring the legacy containers ($STRATEGY)"
 unit_state=$(systemctl --user is-enabled "$LEGACY_UNIT" 2>/dev/null || true)
 state_set LEGACY_UNIT_STATE "${unit_state:-absent}"
 state_set STATUS cutover
@@ -270,10 +291,7 @@ for c in n8n "$DB_CONTAINER"; do
 done
 ql_backup_volume "$DATA_VOLUME" "$bk" >/dev/null
 ql_backup_volume "$DB_VOLUME" "$bk" >/dev/null
-for c in "${LEGACY_CONTAINERS[@]}"; do
-  podman rename "$c" "$c-legacy-$suffix"
-  ql_info "renamed $c -> $c-legacy-$suffix (kept for --rollback)"
-done
+app_legacy_retire "$STRATEGY" "$suffix" "$bk" "${LEGACY_CONTAINERS[@]}"
 app_write_checksums "$bk"
 
 # =============================================================================================
@@ -303,6 +321,10 @@ ql_info "before: $pre_counts"
 ql_info "after:  $post_counts"
 [[ $post_counts == "$pre_counts" ]] || ql_warn "the counts differ; compare with $bk/precheck.txt"
 state_set STATUS "done"
-ql_info "migration complete. Legacy containers *-legacy-$suffix and $LEGACY_UNIT (disabled) are kept for rollback:"
+if [[ $STRATEGY == capture ]]; then
+  ql_info "migration complete. The legacy containers were captured into $bk/legacy-container and removed (podman-restart.service is enabled here, so a renamed copy would have revived at boot); $LEGACY_UNIT is disabled. Roll back with:"
+else
+  ql_info "migration complete. Legacy containers *-legacy-$suffix and $LEGACY_UNIT (disabled) are kept for rollback:"
+fi
 ql_info "  $0 --rollback"
 ql_info "after the soak period, clean up as described in README ('After the soak')"
