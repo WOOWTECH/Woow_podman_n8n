@@ -6,6 +6,8 @@
 - Podman starting point: [`WOOWTECH/Woow_podman_n8n`](https://github.com/WOOWTECH/Woow_podman_n8n), `main` at `4b6c0c49a55e55bc559f41f377fc911dce7cbfa0`. Upstream n8n and runners: `2.38.7`.
 - PaaS Gitea: `woow-paas/woow-paas-charts`, `main`, `charts/n8n`. **Source comparison pending:** `git-prod.woowtech.io` redirects unauthenticated Git requests to Cloudflare Access. The older public `WOOWTECH/Woow_k3s_n8n` chart (`9b0182f44b528d0cdceaeecd2817d7f9e95fe227`, 2026-09-13) is a separate deployment and is not evidence of current PaaS main.
 
+The remaining Gitea review must inspect `Chart.yaml`, `values.yaml`, image build sources and all n8n templates for image/version pins, database and queue mode, Redis, workers/webhooks, task runners, additional nodes, MCP, URL/ingress settings, secrets, backup and lifecycle hooks. Record its main SHA before changing this table.
+
 ## HA to Podman mapping
 
 | Capability | HA add-on | Podman package |
