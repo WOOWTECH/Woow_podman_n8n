@@ -125,6 +125,11 @@ tests/smoke.sh                                   # health checks, changes nothin
 tests/smoke.sh --public-url https://n8n.example.com/
 ```
 
+If Podman storage was reset while systemd stayed running, its one-shot network and volume
+units can still report `active` even though their resources are gone. Re-run `scripts/install.sh`;
+it checks for missing n8n resources and recreates them before starting the containers. This
+creates empty volumes, so recover data from a backup first when the old data matters.
+
 ## Upgrade
 
 The repository is the source of truth: bump `Image=` in `quadlet/n8n.container` **and**

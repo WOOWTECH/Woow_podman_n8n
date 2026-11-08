@@ -16,3 +16,4 @@ fi
 
 run_variant fixture-toypark1234+optional "$REPO/tests/fixtures/toypark1234.env" "${base[@]}" "${optional[@]}"
 "$REPO/tests/config-snapshot.sh"
+"$REPO/tests/resource-recovery.sh"

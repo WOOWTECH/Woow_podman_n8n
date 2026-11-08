@@ -121,6 +121,10 @@ tests/smoke.sh                                   # 健康檢查，不會改動�
 tests/smoke.sh --public-url https://n8n.example.com/
 ```
 
+若執行過 `podman system reset`，systemd 的網路與資料卷單元可能仍顯示 active，實際 Podman
+資源卻已消失。重新執行 `scripts/install.sh` 會在啟動容器前重建缺少的 n8n 資源。重建後的
+資料卷是空的；需要舊資料時，請先確認可用的備份。
+
 ## 升級
 
 repo 是版本的唯一來源：同時修改 `quadlet/n8n.container` 與

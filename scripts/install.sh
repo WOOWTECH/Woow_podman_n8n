@@ -119,6 +119,8 @@ if ((no_start)); then
   ql_info "installed; not started (--no-start). Start with: systemctl --user start $TARGET"
   exit 0
 fi
+systemctl --user daemon-reload
+app_reconcile_resources
 ql_apply_units "$APP" "${units[@]}"
 app_env_record
 

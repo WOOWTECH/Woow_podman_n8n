@@ -57,6 +57,24 @@ app_units() {
   if app_runners_enabled; then printf '%s\n' n8n-runners.service; fi
 }
 
+# A Podman system reset removes resources but leaves systemd's oneshot Quadlet
+# units active. Restart only the stale units before starting their containers.
+app_reconcile_resources() {
+  local kind name unit spec
+  for spec in \
+    network:n8n-network:n8n-network.service \
+    volume:n8n_n8n_data:n8n-data-volume.service \
+    volume:n8n_postgres_data:n8n-postgres-data-volume.service; do
+    IFS=: read -r kind name unit <<<"$spec"
+    if podman "$kind" exists "$name" >/dev/null 2>&1; then continue; fi
+    if systemctl --user is-active --quiet "$unit"; then
+      ql_info "$name is missing while $unit is active; recreating it"
+      systemctl --user restart "$unit" || ql_die "cannot restart $unit"
+      podman "$kind" exists "$name" >/dev/null 2>&1 || ql_die "$unit did not recreate $name"
+    fi
+  done
+}
+
 # app_containers: name:unit of every container this host runs
 app_containers() {
   printf '%s\n' n8n-postgres:n8n-postgres.service n8n:n8n.service
