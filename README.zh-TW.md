@@ -13,8 +13,8 @@ task runner，由使用者的 systemd 管理。unit 就是部署本身：開機�
                                   │
    ┌──────────────────────────────┼───────────────────────────────┐
    │                              │                               │
-n8n-postgres.service         n8n.service  ◀──Requires──  n8n-runners.service
-postgres:16.15-alpine        n8nio/n8n              n8nio/runners（選配）
+n8n-postgres.service         n8n.service  ──Wants──▶    n8n-runners.service
+postgres:16.15-alpine        n8nio/n8n:2.43.6        n8nio/runners:2.43.6
    │  volume                    │  volume                │
    │  n8n_postgres_data         │  n8n_n8n_data          └── JS 與 Python Code 節點
    └──────────────────── network n8n-network ──────────────────────┘
@@ -32,6 +32,7 @@ postgres:16.15-alpine        n8nio/n8n              n8nio/runners（選配）
 | `quadlet/n8n-postgres.container` | `n8n-postgres.service` | PostgreSQL 16 |
 | `quadlet/n8n.container` | `n8n.service` | n8n（編輯器、REST API、webhook、task broker） |
 | `quadlet/optional/n8n-runners.container` | `n8n-runners.service` | 外部 task runner（預設安裝，`--no-runners` 可略過） |
+| `config/n8n-task-runners.json` | 掛載至 runner | 與 HA add-on 相同的 JavaScript／Python 模組匯入權限 |
 | `systemd/n8n.target` | `n8n.target` | 一次操作整個堆疊 |
 
 安裝位置：`~/.config/containers/systemd/`（Quadlet）、`~/.config/systemd/user/`（target）、
@@ -95,12 +96,19 @@ scripts/install.sh --public-url https://n8n.example.com/
 
 | Secret | 用途 |
 |---|---|
-| `n8n-db-password` | `POSTGRES_PASSWORD`（initdb）與 `DB_POSTGRESDB_PASSWORD` |
-| `n8n-runners-auth-token` | n8n 與 runner 共用；即使是 internal 模式也必須存在 |
+| `n8n-db-password` | PostgreSQL 使用 `POSTGRES_PASSWORD`；n8n 透過檔案掛載讀取 |
+| `n8n-runners-auth-token` | n8n 透過檔案讀取，runner launcher 透過 secret 環境變數讀取；internal 模式仍需建立 |
 
 **Task runner**：外部 runner 會把 Code 節點的 JavaScript 與 Python 放到獨立容器執行，這也是
 上游的建議做法；internal 模式下，能編輯工作流程的人就能讀到加密金鑰與所有憑證。
 `n8nio/n8n` 與 `n8nio/runners` 版本必須一致，`tests/dryrun.sh` 與 `scripts/upgrade.sh` 會強制檢查。
+runner 會先啟動、後停止，讓 n8n 關閉前完成執行中的流程。runner 設定與 HA add-on
+允許相同的 JavaScript／Python 模組匯入。實測兩種 Code node 都無法從環境變數讀到資料庫密碼
+或 broker token。
+
+範例設定的 `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` 與 HA add-on 一致，讓既有流程的 `$env`
+運算式繼續讀取非機密設定。工作流程編輯者也能讀到你另外放入 `n8n.env` 的環境變數；
+供應商憑證應放在 n8n Credentials。
 
 ## 日常操作
 
@@ -126,6 +134,8 @@ scripts/upgrade.sh              # 跨大版本（2.x -> 3.x）需要 --allow-maj
 它會拒絕降版、n8n 與 runner 版本不一致、以及 Postgres 大版本變動；在停止任何服務之前先拉取
 映像檔；備份、重啟、以 900 秒逾時執行 smoke 測試；失敗時自動還原舊 unit 並回復升級前的資料庫
 （n8n 的 migration 只能往前）。
+既有主機的 `n8n.env` 不會自動加入新預設值；升級前請和 `config/n8n.env.example` 比對。
+升到 2.43.6 後，舊 API key 若因缺少新 scope 導致公開 API 回傳 403，請重新建立。
 
 **Postgres 大版本升級**（16 -> 17）屬於獨立作業：`scripts/backup.sh --cold`、修改映像檔版本、
 刪除 volume `n8n_postgres_data`、`scripts/install.sh`，最後 `scripts/restore.sh`。

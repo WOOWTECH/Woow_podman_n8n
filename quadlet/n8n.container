@@ -21,7 +21,7 @@ Wants=n8n-runners.service
 [Container]
 ContainerName=n8n
 # n8nio/n8n and n8nio/runners MUST carry the same version (tests/dryrun.local.sh checks it).
-Image=docker.io/n8nio/n8n:2.38.7
+Image=docker.io/n8nio/n8n:2.43.6
 Network=n8n.network
 Volume=n8n-data.volume:/home/node/.n8n
 PublishPort=@@HOST_BIND@@:@@HOST_PORT@@:5678
@@ -32,11 +32,19 @@ Environment=DB_POSTGRESDB_HOST=n8n-postgres
 Environment=DB_POSTGRESDB_PORT=5432
 Environment=DB_POSTGRESDB_DATABASE=n8n
 Environment=DB_POSTGRESDB_USER=n8n
+Environment=NODE_ENV=production
+Environment=GENERIC_TIMEZONE=@@GENERIC_TIMEZONE@@
+Environment=TZ=@@TZ@@
+Environment=DB_POSTGRESDB_PASSWORD_FILE=/run/secrets/n8n-db-password
+Environment=N8N_RUNNERS_AUTH_TOKEN_FILE=/run/secrets/n8n-runners-auth-token
+Environment=N8N_NATIVE_PYTHON_RUNNER=true
+Environment=N8N_MIGRATE_FS_STORAGE_PATH=true
+Environment=N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
 # The task broker (port 5679) listens inside the container only; it is never published.
 # n8n-runners reaches it over n8n-network.
 Environment=N8N_RUNNERS_BROKER_LISTEN_ADDRESS=0.0.0.0
-Secret=n8n-db-password,type=env,target=DB_POSTGRESDB_PASSWORD
-Secret=n8n-runners-auth-token,type=env,target=N8N_RUNNERS_AUTH_TOKEN
+Secret=n8n-db-password,type=mount,target=n8n-db-password
+Secret=n8n-runners-auth-token,type=mount,target=n8n-runners-auth-token
 Label=io.woowtech.app=n8n
 LogDriver=journald
 # /healthz/readiness returns 200 only once the DB is connected and migrated. The image is
@@ -46,7 +54,8 @@ HealthInterval=30s
 HealthTimeout=10s
 HealthRetries=3
 # The first start after a version upgrade runs DB migrations.
-HealthStartPeriod=300s
+HealthStartPeriod=900s
+PodmanArgs=--stop-timeout=60
 
 [Service]
 # Readiness gate: podman 4.9.3 ignores Notify=healthy, so wait for the DB healthcheck.
@@ -57,6 +66,7 @@ SuccessExitStatus=143
 Restart=always
 RestartSec=10
 TimeoutStartSec=900
+TimeoutStopSec=90
 
 [Install]
 WantedBy=default.target

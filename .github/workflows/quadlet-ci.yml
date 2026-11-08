@@ -36,6 +36,9 @@ jobs:
       - name: Quadlet dry-run + systemd-analyze verify
         run: tests/dryrun.sh
 
+      - name: Upgrade snapshot keeps the runner config path
+        run: tests/config-snapshot.sh
+
       - name: The per-app lock is given back by a script that ends normally
         run: tests/lock-release.sh
 

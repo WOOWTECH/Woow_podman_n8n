@@ -71,11 +71,16 @@ app_validate_env() {
   ql_assert_match HOST_PORT "$port" '[0-9]{1,5}'
   ((10#$port >= 1 && 10#$port <= 65535)) || ql_die "HOST_PORT=$port is not a TCP port"
   ql_assert_match N8N_RUNNERS_MODE "$(ql_env_get N8N_RUNNERS_MODE external)" 'external|internal'
+  ql_assert_match GENERIC_TIMEZONE "$(ql_env_get GENERIC_TIMEZONE Asia/Taipei)" '[A-Za-z0-9_+./-]+'
+  ql_assert_match TZ "$(ql_env_get TZ Asia/Taipei)" '[A-Za-z0-9_+./-]+'
   p=$(ql_env_get N8N_PORT 5678)
   [[ $p == 5678 ]] || ql_die "N8N_PORT=$p in $ENV_FILE is n8n's port INSIDE the container and must stay 5678; the host port is HOST_PORT"
   for k in DB_TYPE DB_POSTGRESDB_HOST DB_POSTGRESDB_PORT DB_POSTGRESDB_DATABASE DB_POSTGRESDB_USER \
-    DB_POSTGRESDB_PASSWORD N8N_RUNNERS_AUTH_TOKEN N8N_RUNNERS_BROKER_LISTEN_ADDRESS POSTGRES_PASSWORD; do
+    DB_POSTGRESDB_PASSWORD_FILE N8N_RUNNERS_AUTH_TOKEN_FILE N8N_RUNNERS_BROKER_LISTEN_ADDRESS POSTGRES_PASSWORD; do
     [[ -z ${QL_ENV[$k]+x} ]] || ql_warn "$k in $ENV_FILE is ignored: n8n.container sets it (passwords are podman secrets)"
+  done
+  for k in DB_POSTGRESDB_PASSWORD N8N_RUNNERS_AUTH_TOKEN; do
+    [[ -z ${QL_ENV[$k]+x} ]] || ql_die "$k in $ENV_FILE would expose or override a mounted secret; remove it and use the Podman secret"
   done
   [[ -z ${QL_ENV[WEBHOOK_URL]+x} ]] || ql_warn "WEBHOOK_URL is deprecated since n8n 2.35; use N8N_WEBHOOK_URL (install.sh --public-url sets it)"
   return 0
@@ -111,7 +116,13 @@ app_render() {
   mkdir -p "$w/src" "$w/out"
   cp -p "$REPO"/quadlet/*.container "$REPO"/quadlet/*.volume "$REPO"/quadlet/*.network "$REPO"/systemd/* "$w/src/"
   if app_runners_enabled; then cp -p "$REPO/quadlet/optional/n8n-runners.container" "$w/src/"; fi
-  ql_render "$w/src" "$env" "$REPO/quadlet/render-vars" "$w/out"
+  ql_render "$w/src" "$env" "$REPO/quadlet/render-vars" "$w/out" \
+    "GENERIC_TIMEZONE=$(ql_env_get GENERIC_TIMEZONE Asia/Taipei)" \
+    "TZ=$(ql_env_get TZ Asia/Taipei)"
+  if app_runners_enabled; then
+    mkdir -p "$w/out/config"
+    cp -p "$REPO/config/n8n-task-runners.json" "$w/out/config/"
+  fi
   ql_dryrun "$w/out" --verify --ref-dir "$QDIR" || ql_die "the rendered units failed the dry-run; nothing was installed"
 }
 
@@ -122,14 +133,20 @@ app_require_installed() { app_is_installed || ql_die "$APP is not installed on t
 # app_installed_file <basename>: the unit file is in the manifest
 app_installed_file() { app_is_installed && awk -v b="$1" '{ n = split($2, p, "/"); if (p[n] == b) f = 1 } END { exit !f }' "$(app_manifest)"; }
 
-# app_snapshot_units <dir>: copy every installed unit file into <dir> (flat), so a later
-# `ql_install_files <dir> $APP --prune` puts exactly this set back (upgrade rollback).
+# app_snapshot_units <dir>: copy installed units plus config/ files into the
+# layout ql_install_files expects, so upgrade rollback restores both.
 app_snapshot_units() {
-  local dest=$1 sha path
+  local dest=$1 sha path config_dir
+  config_dir=$(_ql_config_root)/$APP
   mkdir -p "$dest"
   while read -r sha path; do
     [[ -n $sha && -f $path ]] || continue
-    cp -p -- "$path" "$dest/"
+    if [[ $path == "$config_dir"/* ]]; then
+      mkdir -p "$dest/config"
+      cp -p -- "$path" "$dest/config/"
+    else
+      cp -p -- "$path" "$dest/"
+    fi
   done <"$(app_manifest)"
 }
 

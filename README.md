@@ -14,8 +14,8 @@ pinned in this repository.
                                   │
    ┌──────────────────────────────┼───────────────────────────────┐
    │                              │                               │
-n8n-postgres.service         n8n.service  ◀──Requires──  n8n-runners.service
-postgres:16.15-alpine        n8nio/n8n              n8nio/runners (optional)
+n8n-postgres.service         n8n.service  ──Wants──▶    n8n-runners.service
+postgres:16.15-alpine        n8nio/n8n:2.43.6        n8nio/runners:2.43.6
    │  volume                    │  volume                │
    │  n8n_postgres_data         │  n8n_n8n_data          └── JS + Python Code nodes
    └──────────────────── network n8n-network ──────────────────────┘
@@ -33,6 +33,7 @@ postgres:16.15-alpine        n8nio/n8n              n8nio/runners (optional)
 | `quadlet/n8n-postgres.container` | `n8n-postgres.service` | PostgreSQL 16 |
 | `quadlet/n8n.container` | `n8n.service` | n8n (editor, REST API, webhooks, task broker) |
 | `quadlet/optional/n8n-runners.container` | `n8n-runners.service` | external task runners (default; `--no-runners` skips them) |
+| `config/n8n-task-runners.json` | mounted in the runner | same JavaScript and Python import permissions as the HA add-on |
 | `systemd/n8n.target` | `n8n.target` | one handle for the whole stack |
 
 Installed to `~/.config/containers/systemd/` (Quadlet), `~/.config/systemd/user/` (target) and
@@ -96,13 +97,21 @@ units own them. `install.sh` warns about keys it ignores.
 
 | Secret | Used by |
 |---|---|
-| `n8n-db-password` | `POSTGRES_PASSWORD` (initdb) and `DB_POSTGRESDB_PASSWORD` |
-| `n8n-runners-auth-token` | n8n and the runners; required even in internal mode |
+| `n8n-db-password` | `POSTGRES_PASSWORD` for PostgreSQL; mounted as a file for n8n |
+| `n8n-runners-auth-token` | mounted as a file for n8n; passed to the separate runner launcher; required even in internal mode |
 
 **Task runners.** External runners run Code-node JavaScript and Python in their own container,
 which is upstream's recommendation: in internal mode a workflow author can read the encryption
 key and every stored credential. `n8nio/n8n` and `n8nio/runners` must carry the same version;
-`tests/dryrun.sh` and `scripts/upgrade.sh` enforce that.
+`tests/dryrun.sh` and `scripts/upgrade.sh` enforce that. The launcher starts before n8n so n8n
+can finish executions before the launcher stops. The runner config permits the same JavaScript
+and Python module imports as the HA add-on. Only the runner receives the broker token as an
+environment variable; the tested JavaScript and Python Code nodes cannot read either secret
+through their environment.
+
+`N8N_BLOCK_ENV_ACCESS_IN_NODE=false` matches the HA add-on so existing workflow expressions
+can read non-secret settings. A workflow editor can read any additional environment variables
+placed in `n8n.env`; store provider credentials in n8n Credentials instead.
 
 ## Operations
 
@@ -129,7 +138,9 @@ scripts/upgrade.sh              # --allow-major for 2.x -> 3.x
 It refuses a downgrade, a version skew between n8n and the runners, and a Postgres major
 change; pulls every image before anything stops; backs up; restarts; runs the smoke test with a
 900 s timeout; and on failure puts the previous units back and restores the pre-upgrade
-database automatically (n8n migrations are forward-only).
+database automatically (n8n migrations are forward-only). An existing host's `n8n.env` does
+not receive new defaults automatically; compare it with `config/n8n.env.example` before upgrading.
+For n8n 2.43.6, re-create older API keys if public API calls return 403 due to missing scopes.
 
 **Postgres major upgrade** (16 -> 17) is a separate job: `scripts/backup.sh --cold`, bump the
 image, delete the volume `n8n_postgres_data`, `scripts/install.sh`, then `scripts/restore.sh`.
