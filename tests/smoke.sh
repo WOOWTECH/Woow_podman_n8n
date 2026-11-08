@@ -68,7 +68,9 @@ log=$(podman logs n8n 2>&1 || true)
 if app_runners_enabled; then
   if grep -q 'Python 3 is missing' <<<"$log"; then bad "n8n still starts internal runners (Python 3 is missing)"; else ok "no internal-runner warning"; fi
   if app_installed_file n8n-task-runners.json; then
-    deadline=$((SECONDS + timeout))
+    runner_wait=$timeout
+    ((runner_wait > 120)) && runner_wait=120
+    deadline=$((SECONDS + runner_wait))
     while ((SECONDS < deadline)); do
       log=$(podman logs n8n 2>&1 || true)
       if grep -q 'Registered runner "launcher-javascript"' <<<"$log" \
