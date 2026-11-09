@@ -141,6 +141,14 @@ running `scripts/install.sh` again. Only the main process receives the correspon
 setting. `--public-url` still identifies the public URL; it does not configure the reverse
 proxy. See the [n8n webhook processor routing guide](https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/enable-queue-mode/).
 
+For a LAN deployment without a reverse proxy, publish the processor on a separate port and
+set `N8N_WEBHOOK_URL=http://<host>:<WEBHOOK_PORT>/` in `n8n.env`; keep
+`N8N_EDITOR_BASE_URL=http://<host>:<HOST_PORT>/`. Run `scripts/install.sh` after editing the
+file. Check that another machine can reach both ports (including the host firewall) and that
+a production webhook succeeds on `WEBHOOK_PORT` before disabling main webhooks. Once disabled,
+the main port no longer serves `/webhook/*` or `/webhook-waiting/*`. If you later run
+`install.sh --public-url`, set `N8N_WEBHOOK_URL` back to the processor URL before installing.
+
 Run `tests/smoke.sh` after changing topology. `tests/queue-integration.py` exercises an
 independent queue stack with PostgreSQL, Valkey, both runners and a real Code-node webhook;
 it needs the four pinned images locally and removes its test resources. To return to regular
