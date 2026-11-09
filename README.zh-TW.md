@@ -136,6 +136,14 @@ queue 資料。各 n8n 程序在共用資料卷使用不同的事件日誌檔。
 主程序。`--public-url` 只設定 n8n 對外網址，不會修改反向代理路由。詳見
 [n8n webhook processor 路由說明](https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/enable-queue-mode/)。
 
+若區網環境沒有反向代理，可直接公布 processor 的另一個埠，並在 `n8n.env` 設定
+`N8N_WEBHOOK_URL=http://<主機>:<WEBHOOK_PORT>/`，同時保留
+`N8N_EDITOR_BASE_URL=http://<主機>:<HOST_PORT>/`。修改後執行 `scripts/install.sh`。
+先從另一台主機確認兩個埠都能連線（包含主機防火牆），並實測正式 webhook 在
+`WEBHOOK_PORT` 執行成功，再關閉主程序的正式 webhook。關閉後，主程序埠不再處理
+`/webhook/*` 或 `/webhook-waiting/*`。若之後執行 `install.sh --public-url`，安裝前須
+重新把 `N8N_WEBHOOK_URL` 設回 processor 網址。
+
 切換後執行 `tests/smoke.sh`。`tests/queue-integration.py` 會用隔離的 PostgreSQL、Valkey、
 兩組 runner 與真實 Code 節點 webhook 驗證 queue；需要先下載四個釘選映像檔，測試結束會
 移除測試資源。若要切回 regular，將 `N8N_QUEUE_DISABLE_MAIN_WEBHOOKS=false`、
