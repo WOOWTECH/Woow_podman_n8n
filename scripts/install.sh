@@ -100,8 +100,14 @@ if ! app_runners_enabled && app_installed_file n8n-runners.container; then
   ql_info "N8N_RUNNERS_MODE=internal: removing the task-runner sidecar"
   ql_remove_files "$APP" n8n-runners.container
 fi
+if ! app_runners_enabled && app_installed_file n8n-task-runners.json; then
+  ql_remove_files "$APP" config/n8n-task-runners.json
+fi
 changed=$(ql_install_files "$WORK/out" "$APP")
 [[ -z $changed ]] || ql_info "changed: $(tr '\n' ' ' <<<"$changed")"
+if [[ $changed == *config/n8n-task-runners.json* ]]; then
+  ql_mark_changed "$APP" n8n-runners.service
+fi
 [[ $render_env != "$ENV_FILE" ]] || app_env_mark_if_changed
 if [[ $dry == 1 ]]; then
   ql_info "dry-run complete; nothing was changed"
@@ -113,6 +119,8 @@ if ((no_start)); then
   ql_info "installed; not started (--no-start). Start with: systemctl --user start $TARGET"
   exit 0
 fi
+systemctl --user daemon-reload
+app_reconcile_resources
 ql_apply_units "$APP" "${units[@]}"
 app_env_record
 

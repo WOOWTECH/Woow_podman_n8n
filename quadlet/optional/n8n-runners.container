@@ -9,16 +9,19 @@
 Description=n8n task runners
 Documentation=https://github.com/WOOWTECH/Woow_podman_n8n
 PartOf=n8n.target
-# The broker lives in n8n: start after it and restart together with it.
-Requires=n8n.service
-After=n8n.service
+# Start the launcher first. On stop, systemd reverses this order so n8n can
+# finish executions and close the broker before the launcher exits.
+Before=n8n.service
 
 [Container]
 ContainerName=n8n-runners
 # MUST equal the n8nio/n8n version in n8n.container.
-Image=docker.io/n8nio/runners:2.38.7
+Image=docker.io/n8nio/runners:2.43.6
 Network=n8n.network
+Volume=%h/.config/n8n/n8n-task-runners.json:/etc/n8n-task-runners.json:ro
 Environment=N8N_RUNNERS_TASK_BROKER_URI=http://n8n:5679
+Environment=GENERIC_TIMEZONE=@@GENERIC_TIMEZONE@@
+Environment=TZ=@@TZ@@
 Secret=n8n-runners-auth-token,type=env,target=N8N_RUNNERS_AUTH_TOKEN
 Label=io.woowtech.app=n8n
 LogDriver=journald
@@ -28,6 +31,7 @@ HealthInterval=30s
 HealthTimeout=5s
 HealthRetries=3
 HealthStartPeriod=60s
+PodmanArgs=--stop-timeout=60
 
 [Service]
 # A container stopped by systemd is stopped with SIGTERM: an entrypoint that does not
@@ -36,6 +40,7 @@ SuccessExitStatus=143
 Restart=always
 RestartSec=10
 TimeoutStartSec=900
+TimeoutStopSec=90
 
 [Install]
 WantedBy=default.target

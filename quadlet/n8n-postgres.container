@@ -1,6 +1,6 @@
 # n8n-postgres.container: PostgreSQL 16 for n8n.
-# n8n 2.38 logs "Postgres 16 is outside the supported range"; moving to 17 is a
-# separate dump/restore change, not part of the Quadlet conversion.
+# PostgreSQL 16 remains in n8n's compatibility range for n8n 2.43.6. Moving
+# to a newer major version is a separate dump/restore change.
 # Password: podman secret n8n-db-password (initdb reads it only on an empty volume).
 [Unit]
 Description=n8n PostgreSQL

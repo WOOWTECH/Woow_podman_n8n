@@ -3,3 +3,5 @@
 # hard render error.
 HOST_BIND
 HOST_PORT
+GENERIC_TIMEZONE
+TZ

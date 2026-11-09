@@ -67,16 +67,40 @@ fi
 log=$(podman logs n8n 2>&1 || true)
 if app_runners_enabled; then
   if grep -q 'Python 3 is missing' <<<"$log"; then bad "n8n still starts internal runners (Python 3 is missing)"; else ok "no internal-runner warning"; fi
-  if grep -q 'Registered runner' <<<"$log"; then
-    ok "a task runner registered with the broker"
+  if app_installed_file n8n-task-runners.json; then
+    runner_wait=$timeout
+    ((runner_wait > 120)) && runner_wait=120
+    deadline=$((SECONDS + runner_wait))
+    while ((SECONDS < deadline)); do
+      log=$(podman logs n8n 2>&1 || true)
+      if grep -q 'Registered runner "launcher-javascript"' <<<"$log" \
+        && grep -q 'Registered runner "launcher-python"' <<<"$log"; then break; fi
+      sleep 2
+    done
+    if grep -q 'Registered runner "launcher-javascript"' <<<"$log" \
+      && grep -q 'Registered runner "launcher-python"' <<<"$log"; then
+      ok "JavaScript and Python runners registered with the broker"
+    else
+      bad "JavaScript or Python runner did not register with the broker"
+    fi
+    runner_config_matches() {
+      podman exec n8n-runners cat /etc/n8n-task-runners.json \
+        | cmp -s "$(_ql_config_root)/n8n/n8n-task-runners.json" -
+    }
+    check "runner config matches the installed allow-list" runner_config_matches
   else
-    ql_info "note: no runner registration logged yet (the launcher starts runners on the first Code-node task)"
+    ql_info "note: legacy runner config; launcher registration is not asserted"
   fi
 fi
 if grep -q 'WEBHOOK_URL ->' <<<"$log"; then bad "deprecated WEBHOOK_URL is still set (use N8N_WEBHOOK_URL)"; else ok "no WEBHOOK_URL deprecation"; fi
 
 # 6. the credentials encryption key lives in the n8n_n8n_data volume
 check "encryption key present in /home/node/.n8n/config" podman exec n8n test -s /home/node/.n8n/config
+if grep -q '^Secret=n8n-db-password,type=mount' "$QDIR/n8n.container"; then
+  # shellcheck disable=SC2016 # The container shell expands these values.
+  check "database and broker secrets are mounted, not exposed as n8n environment values" \
+    podman exec n8n sh -c 'test -s /run/secrets/n8n-db-password && test -s /run/secrets/n8n-runners-auth-token && test -z "${DB_POSTGRESDB_PASSWORD:-}" && test -z "${N8N_RUNNERS_AUTH_TOKEN:-}"'
+fi
 
 # 7. the published port listens only where HOST_BIND says
 port=$(ql_env_get HOST_PORT) bind=$(ql_env_get HOST_BIND)
