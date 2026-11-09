@@ -21,8 +21,10 @@ DB_USER=n8n
 DB_NAME=n8n
 DATA_VOLUME=n8n_n8n_data
 DB_VOLUME=n8n_postgres_data
+VALKEY_VOLUME=n8n_valkey_data
 SECRET_DB=n8n-db-password
 SECRET_RUNNERS=n8n-runners-auth-token
+SECRET_VALKEY=n8n-valkey-password
 # Units whose container reads ~/.config/n8n/n8n.env (restarted when the file changes).
 ENV_READERS=(n8n.service)
 
@@ -46,25 +48,40 @@ app_installed_image() {
 N8N_IMAGE=$(app_pin n8n.container)
 RUNNERS_IMAGE=$(app_pin optional/n8n-runners.container)
 PG_IMAGE=$(app_pin n8n-postgres.container)
+VALKEY_IMAGE=$(app_pin queue/n8n-valkey.container)
+WORKER_IMAGE=$(app_pin queue/n8n-worker.container)
+WEBHOOK_IMAGE=$(app_pin queue/n8n-webhook.container)
+WORKER_RUNNERS_IMAGE=$(app_pin queue/n8n-worker-runners.container)
 N8N_VERSION=$(app_tag "$N8N_IMAGE")
 
 # ---- per-host settings --------------------------------------------------------------------
 app_runners_enabled() { [[ $(ql_env_get N8N_RUNNERS_MODE external) == external ]]; }
+app_queue_enabled() { [[ $(ql_env_get EXECUTIONS_MODE regular) == queue ]]; }
+app_webhook_enabled() { app_queue_enabled && [[ $(ql_env_get N8N_QUEUE_WEBHOOK_PROCESSOR false) == true ]]; }
 
 # app_units: every unit this host runs, the target first
 app_units() {
-  printf '%s\n' "$TARGET" n8n-postgres.service n8n.service
+  printf '%s\n' "$TARGET" n8n-postgres.service
+  if app_queue_enabled; then printf '%s\n' n8n-valkey.service; fi
+  printf '%s\n' n8n.service
   if app_runners_enabled; then printf '%s\n' n8n-runners.service; fi
+  if app_queue_enabled; then
+    printf '%s\n' n8n-worker-runners.service n8n-worker.service
+    if app_webhook_enabled; then printf '%s\n' n8n-webhook.service; fi
+  fi
 }
 
 # A Podman system reset removes resources but leaves systemd's oneshot Quadlet
 # units active. Restart only the stale units before starting their containers.
 app_reconcile_resources() {
   local kind name unit spec
-  for spec in \
-    network:n8n-network:n8n-network.service \
-    volume:n8n_n8n_data:n8n-data-volume.service \
-    volume:n8n_postgres_data:n8n-postgres-data-volume.service; do
+  local -a resources=(
+    network:n8n-network:n8n-network.service
+    volume:n8n_n8n_data:n8n-data-volume.service
+    volume:n8n_postgres_data:n8n-postgres-data-volume.service
+  )
+  if app_queue_enabled; then resources+=(volume:n8n_valkey_data:n8n-valkey-data-volume.service); fi
+  for spec in "${resources[@]}"; do
     IFS=: read -r kind name unit <<<"$spec"
     if podman "$kind" exists "$name" >/dev/null 2>&1; then continue; fi
     if systemctl --user is-active --quiet "$unit"; then
@@ -79,6 +96,10 @@ app_reconcile_resources() {
 app_containers() {
   printf '%s\n' n8n-postgres:n8n-postgres.service n8n:n8n.service
   if app_runners_enabled; then printf '%s\n' n8n-runners:n8n-runners.service; fi
+  if app_queue_enabled; then
+    printf '%s\n' n8n-valkey:n8n-valkey.service n8n-worker-runners:n8n-worker-runners.service n8n-worker:n8n-worker.service
+    if app_webhook_enabled; then printf '%s\n' n8n-webhook:n8n-webhook.service; fi
+  fi
 }
 
 # app_validate_env: dies on a value the units or n8n cannot work with (QL_ENV is loaded)
@@ -89,6 +110,26 @@ app_validate_env() {
   ql_assert_match HOST_PORT "$port" '[0-9]{1,5}'
   ((10#$port >= 1 && 10#$port <= 65535)) || ql_die "HOST_PORT=$port is not a TCP port"
   ql_assert_match N8N_RUNNERS_MODE "$(ql_env_get N8N_RUNNERS_MODE external)" 'external|internal'
+  ql_assert_match EXECUTIONS_MODE "$(ql_env_get EXECUTIONS_MODE regular)" 'regular|queue'
+  ql_assert_match N8N_QUEUE_WEBHOOK_PROCESSOR "$(ql_env_get N8N_QUEUE_WEBHOOK_PROCESSOR false)" 'true|false'
+  ql_assert_match N8N_QUEUE_DISABLE_MAIN_WEBHOOKS "$(ql_env_get N8N_QUEUE_DISABLE_MAIN_WEBHOOKS false)" 'true|false'
+  if app_queue_enabled; then
+    app_runners_enabled || ql_die 'queue mode needs external task runners for the main process and worker'
+    p=$(ql_env_get WORKER_CONCURRENCY 5)
+    ql_assert_match WORKER_CONCURRENCY "$p" '[0-9]{1,3}'
+    ((10#$p >= 1 && 10#$p <= 100)) || ql_die "WORKER_CONCURRENCY=$p must be 1..100"
+  elif [[ $(ql_env_get N8N_QUEUE_WEBHOOK_PROCESSOR false) == true ]]; then
+    ql_die 'N8N_QUEUE_WEBHOOK_PROCESSOR=true requires EXECUTIONS_MODE=queue'
+  fi
+  if app_webhook_enabled; then
+    p=$(ql_env_get WEBHOOK_PORT 15679)
+    ql_assert_match WEBHOOK_PORT "$p" '[0-9]{1,5}'
+    ((10#$p >= 1 && 10#$p <= 65535)) || ql_die "WEBHOOK_PORT=$p is not a TCP port"
+    [[ $p != "$port" ]] || ql_die "WEBHOOK_PORT must differ from HOST_PORT=$port"
+  fi
+  if [[ $(ql_env_get N8N_QUEUE_DISABLE_MAIN_WEBHOOKS false) == true ]]; then
+    app_webhook_enabled || ql_die 'N8N_QUEUE_DISABLE_MAIN_WEBHOOKS=true requires a webhook processor'
+  fi
   ql_assert_match GENERIC_TIMEZONE "$(ql_env_get GENERIC_TIMEZONE Asia/Taipei)" '[A-Za-z0-9_+./-]+'
   ql_assert_match TZ "$(ql_env_get TZ Asia/Taipei)" '[A-Za-z0-9_+./-]+'
   p=$(ql_env_get N8N_PORT 5678)
@@ -97,9 +138,16 @@ app_validate_env() {
     DB_POSTGRESDB_PASSWORD_FILE N8N_RUNNERS_AUTH_TOKEN_FILE N8N_RUNNERS_BROKER_LISTEN_ADDRESS POSTGRES_PASSWORD; do
     [[ -z ${QL_ENV[$k]+x} ]] || ql_warn "$k in $ENV_FILE is ignored: n8n.container sets it (passwords are podman secrets)"
   done
-  for k in DB_POSTGRESDB_PASSWORD N8N_RUNNERS_AUTH_TOKEN; do
+  if app_queue_enabled; then
+    for k in QUEUE_BULL_REDIS_HOST QUEUE_BULL_REDIS_PORT QUEUE_BULL_REDIS_PASSWORD_FILE N8N_DEFAULT_BINARY_DATA_MODE; do
+      [[ -z ${QL_ENV[$k]+x} ]] || ql_warn "$k in $ENV_FILE is ignored in queue mode: the Quadlet units set it"
+    done
+  fi
+  for k in DB_POSTGRESDB_PASSWORD N8N_RUNNERS_AUTH_TOKEN QUEUE_BULL_REDIS_PASSWORD N8N_ENCRYPTION_KEY; do
     [[ -z ${QL_ENV[$k]+x} ]] || ql_die "$k in $ENV_FILE would expose or override a mounted secret; remove it and use the Podman secret"
   done
+  [[ -z ${QL_ENV[N8N_DISABLE_PRODUCTION_MAIN_PROCESS]+x} ]] \
+    || ql_die 'use N8N_QUEUE_DISABLE_MAIN_WEBHOOKS so only the main process receives N8N_DISABLE_PRODUCTION_MAIN_PROCESS'
   [[ -z ${QL_ENV[WEBHOOK_URL]+x} ]] || ql_warn "WEBHOOK_URL is deprecated since n8n 2.35; use N8N_WEBHOOK_URL (install.sh --public-url sets it)"
   return 0
 }
@@ -134,12 +182,26 @@ app_render() {
   mkdir -p "$w/src" "$w/out"
   cp -p "$REPO"/quadlet/*.container "$REPO"/quadlet/*.volume "$REPO"/quadlet/*.network "$REPO"/systemd/* "$w/src/"
   if app_runners_enabled; then cp -p "$REPO/quadlet/optional/n8n-runners.container" "$w/src/"; fi
+  if app_queue_enabled; then
+    cp -p "$REPO"/quadlet/queue/*.container "$REPO"/quadlet/queue/*.volume "$w/src/"
+    cat "$REPO/quadlet/queue/n8n-main.fragment" >>"$w/src/n8n.container"
+    if [[ $(ql_env_get N8N_QUEUE_DISABLE_MAIN_WEBHOOKS false) == true ]]; then
+      printf '\n[Container]\nEnvironment=N8N_DISABLE_PRODUCTION_MAIN_PROCESS=true\n' >>"$w/src/n8n.container"
+    fi
+    if ! app_webhook_enabled; then rm -f "$w/src/n8n-webhook.container"; fi
+  fi
   ql_render "$w/src" "$env" "$REPO/quadlet/render-vars" "$w/out" \
+    "WEBHOOK_PORT=$(ql_env_get WEBHOOK_PORT 15679)" \
+    "WORKER_CONCURRENCY=$(ql_env_get WORKER_CONCURRENCY 5)" \
     "GENERIC_TIMEZONE=$(ql_env_get GENERIC_TIMEZONE Asia/Taipei)" \
     "TZ=$(ql_env_get TZ Asia/Taipei)"
   if app_runners_enabled; then
     mkdir -p "$w/out/config"
     cp -p "$REPO/config/n8n-task-runners.json" "$w/out/config/"
+  fi
+  if app_queue_enabled; then
+    mkdir -p "$w/out/config"
+    cp -p "$REPO/config/start-valkey.sh" "$w/out/config/"
   fi
   ql_dryrun "$w/out" --verify --ref-dir "$QDIR" || ql_die "the rendered units failed the dry-run; nothing was installed"
 }
@@ -150,6 +212,27 @@ app_is_installed() { [[ -s $(app_manifest) ]]; }
 app_require_installed() { app_is_installed || ql_die "$APP is not installed on this host (run scripts/install.sh first)"; }
 # app_installed_file <basename>: the unit file is in the manifest
 app_installed_file() { app_is_installed && awk -v b="$1" '{ n = split($2, p, "/"); if (p[n] == b) f = 1 } END { exit !f }' "$(app_manifest)"; }
+app_installed_queue_enabled() {
+  app_installed_file n8n-valkey.container && [[ -f $QDIR/n8n.container ]] \
+    && grep -qx 'Environment=EXECUTIONS_MODE=queue' "$QDIR/n8n.container"
+}
+
+# The manifest describes the running topology even when n8n.env has already been edited.
+# Keep the database up while stopping its clients for a consistent logical dump.
+app_installed_units() {
+  local name
+  for name in n8n-postgres n8n-valkey n8n n8n-runners n8n-worker-runners n8n-worker n8n-webhook; do
+    if app_installed_file "$name.container"; then printf '%s.service\n' "$name"; fi
+  done
+}
+app_stop_runtime() {
+  local name
+  for name in n8n-webhook n8n-worker n8n n8n-worker-runners n8n-runners n8n-valkey; do
+    if app_installed_file "$name.container"; then
+      systemctl --user stop "$name.service" || ql_die "cannot stop $name.service"
+    fi
+  done
+}
 
 # app_snapshot_units <dir>: copy installed units plus config/ files into the
 # layout ql_install_files expects, so upgrade rollback restores both.
@@ -173,7 +256,10 @@ app_snapshot_units() {
 app_env_hash() { sha256sum <"$ENV_FILE" | cut -d' ' -f1; }
 app_env_mark_if_changed() {
   local f=$APP_STATE_DIR/env.sha256
-  if [[ ! -f $f || $(<"$f") != "$(app_env_hash)" ]]; then ql_mark_changed "$APP" "${ENV_READERS[@]}"; fi
+  local -a readers=("${ENV_READERS[@]}")
+  if app_queue_enabled; then readers+=(n8n-worker.service); fi
+  if app_webhook_enabled; then readers+=(n8n-webhook.service); fi
+  if [[ ! -f $f || $(<"$f") != "$(app_env_hash)" ]]; then ql_mark_changed "$APP" "${readers[@]}"; fi
 }
 app_env_record() {
   [[ ${QL_DRY_RUN:-0} == 1 ]] && return 0

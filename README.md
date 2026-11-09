@@ -33,6 +33,9 @@ postgres:16.15-alpine        n8nio/n8n:2.43.6        n8nio/runners:2.43.6
 | `quadlet/n8n-postgres.container` | `n8n-postgres.service` | PostgreSQL 16 |
 | `quadlet/n8n.container` | `n8n.service` | n8n (editor, REST API, webhooks, task broker) |
 | `quadlet/optional/n8n-runners.container` | `n8n-runners.service` | external task runners (default; `--no-runners` skips them) |
+| `quadlet/queue/n8n-valkey.container` and `n8n-valkey-data.volume` | `n8n-valkey.service` | optional password-protected queue broker and persistent AOF volume |
+| `quadlet/queue/n8n-worker.container` and `n8n-worker-runners.container` | worker services | optional queue worker and its matching Code-node runner |
+| `quadlet/queue/n8n-webhook.container` | `n8n-webhook.service` | optional dedicated production webhook processor |
 | `config/n8n-task-runners.json` | mounted in the runner | same JavaScript and Python import permissions as the HA add-on |
 | `systemd/n8n.target` | `n8n.target` | one handle for the whole stack |
 
@@ -84,11 +87,16 @@ works. Re-run `scripts/install.sh` after an edit: it restarts only what changed.
 |---|---|---|
 | `HOST_BIND` | `127.0.0.1` | publish address. `0.0.0.0` exposes n8n on every interface |
 | `HOST_PORT` | `15678` | published port (n8n listens on 5678 inside the container) |
+| `WEBHOOK_PORT` | `15679` | separate published port when the webhook processor is enabled |
 | `N8N_HOST`, `N8N_PROTOCOL` | `localhost`, `http` | hostname and scheme n8n believes it is reached at |
 | `N8N_EDITOR_BASE_URL`, `N8N_WEBHOOK_URL` | unset | public URLs (set by `--public-url`) |
 | `N8N_PROXY_HOPS` | unset | number of proxies in front (1 for a tunnel or NPM) |
 | `GENERIC_TIMEZONE`, `TZ` | `Asia/Taipei` | schedule and log timezone |
 | `N8N_RUNNERS_MODE` | `external` | `external` installs the sidecar, `internal` runs code inside n8n |
+| `EXECUTIONS_MODE` | `regular` | `queue` installs Valkey, one worker and its own task runner; requires external runners |
+| `WORKER_CONCURRENCY` | `5` | concurrent queued executions in the worker (1–100) |
+| `N8N_QUEUE_WEBHOOK_PROCESSOR` | `false` | in queue mode, also run a dedicated webhook process |
+| `N8N_QUEUE_DISABLE_MAIN_WEBHOOKS` | `false` | stop production webhooks on the main process after the proxy route is working |
 
 Do not set `N8N_PORT` (n8n's port inside the container) or the `DB_POSTGRESDB_*` keys; the
 units own them. `install.sh` warns about keys it ignores.
@@ -99,6 +107,7 @@ units own them. `install.sh` warns about keys it ignores.
 |---|---|
 | `n8n-db-password` | `POSTGRES_PASSWORD` for PostgreSQL; mounted as a file for n8n |
 | `n8n-runners-auth-token` | mounted as a file for n8n; passed to the separate runner launcher; required even in internal mode |
+| `n8n-valkey-password` | mounted as a file in n8n and Valkey; created when queue mode is selected |
 
 **Task runners.** External runners run Code-node JavaScript and Python in their own container,
 which is upstream's recommendation: in internal mode a workflow author can read the encryption
@@ -112,6 +121,33 @@ through their environment.
 `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` matches the HA add-on so existing workflow expressions
 can read non-secret settings. A workflow editor can read any additional environment variables
 placed in `n8n.env`; store provider credentials in n8n Credentials instead.
+
+## Optional queue mode
+
+Set `EXECUTIONS_MODE=queue` in `~/.config/n8n/n8n.env`, then run
+`scripts/install.sh --dry-run` and `scripts/install.sh`. On an existing installation, the
+installer takes a **cold backup before switching topology**, stops the application processes,
+and starts the new stack. Queue mode keeps PostgreSQL as the database, uses a private Valkey
+with persistent AOF, and gives each n8n process a distinct event-log file on the shared
+`n8n_n8n_data` volume. The one worker runs with configurable concurrency (5 by default) and has its own matching
+JavaScript/Python runner. Queue mode uses database binary storage, as required by
+[n8n queue mode](https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/enable-queue-mode/).
+
+To add the optional processor, set `N8N_QUEUE_WEBHOOK_PROCESSOR=true` and choose a free
+`WEBHOOK_PORT`. Route `/webhook/*` and `/webhook-waiting/*` to `HOST_BIND:WEBHOOK_PORT`;
+route `/webhook-test/*`, the editor and API to `HOST_BIND:HOST_PORT`. Check a production
+webhook through the public URL before setting `N8N_QUEUE_DISABLE_MAIN_WEBHOOKS=true` and
+running `scripts/install.sh` again. Only the main process receives the corresponding n8n
+setting. `--public-url` still identifies the public URL; it does not configure the reverse
+proxy. See the [n8n webhook processor routing guide](https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/enable-queue-mode/).
+
+Run `tests/smoke.sh` after changing topology. `tests/queue-integration.py` exercises an
+independent queue stack with PostgreSQL, Valkey, both runners and a real Code-node webhook;
+it needs the four pinned images locally and removes its test resources. To return to regular
+mode, set `N8N_QUEUE_DISABLE_MAIN_WEBHOOKS=false`,
+`N8N_QUEUE_WEBHOOK_PROCESSOR=false`, `EXECUTIONS_MODE=regular`, then run
+`scripts/install.sh`. The old Valkey data volume and secret remain available for a later
+queue restore until an explicit purge.
 
 ## Operations
 
@@ -133,7 +169,9 @@ creates empty volumes, so recover data from a backup first when the old data mat
 ## Upgrade
 
 The repository is the source of truth: bump `Image=` in `quadlet/n8n.container` **and**
-`quadlet/optional/n8n-runners.container` (same version), commit, then:
+`quadlet/optional/n8n-runners.container`, `quadlet/queue/n8n-worker.container`,
+`quadlet/queue/n8n-webhook.container`, and `quadlet/queue/n8n-worker-runners.container`
+(same n8n or runner version), commit, then:
 
 ```bash
 git pull
@@ -143,7 +181,8 @@ scripts/upgrade.sh              # --allow-major for 2.x -> 3.x
 It refuses a downgrade, a version skew between n8n and the runners, and a Postgres major
 change; pulls every image before anything stops; backs up; restarts; runs the smoke test with a
 900 s timeout; and on failure puts the previous units back and restores the pre-upgrade
-database automatically (n8n migrations are forward-only). An existing host's `n8n.env` does
+database automatically (n8n migrations are forward-only). Queue-mode upgrades use a cold
+backup and restore both the database and Valkey state on failure. An existing host's `n8n.env` does
 not receive new defaults automatically; compare it with `config/n8n.env.example` before upgrading.
 For n8n 2.43.6, re-create older API keys if public API calls return 403 due to missing scopes.
 
@@ -153,8 +192,8 @@ image, delete the volume `n8n_postgres_data`, `scripts/install.sh`, then `script
 ## Backup and restore
 
 ```bash
-scripts/backup.sh                     # hot: DB dump, roles, n8n_n8n_data, secrets, units
-scripts/backup.sh --cold              # also stops the stack and exports n8n_postgres_data
+scripts/backup.sh                     # regular: hot; queue: automatically cold
+scripts/backup.sh --cold              # consistent DB dump and exports all active volumes
 scripts/restore.sh ~/backups/n8n/<timestamp> [--yes]
 ```
 
@@ -162,6 +201,8 @@ A backup directory is mode 0700 and carries `SHA256SUMS`, which `restore.sh` ver
 contains the **credentials encryption key** (`n8n_n8n_data`) and the database password: store
 copies off this host, and treat them like the credentials themselves. Without the encryption
 key the credentials in a restored database cannot be decrypted.
+Queue backups also contain `n8n_valkey_data` and its secret; restore a queue backup into a
+queue-mode installation, so the database and pending jobs match.
 
 A nightly backup, as the service user:
 
@@ -177,7 +218,7 @@ scripts/uninstall.sh                  # stops and removes the units; keeps all d
 scripts/uninstall.sh --purge --yes    # also deletes the volumes, network and secrets
 ```
 
-`--purge` is the only way this repo deletes data, and it exports both volumes and the secrets
+`--purge` is the only way this repo deletes data, and it exports the active volumes and secrets
 to `~/backups/n8n/purge-<timestamp>/` first. `~/.config/n8n/n8n.env` is always kept.
 
 ## Migrating an existing compose or podman-compose deployment

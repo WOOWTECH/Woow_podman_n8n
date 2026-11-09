@@ -3,8 +3,8 @@
 #
 #   scripts/uninstall.sh                   stop and remove the units; keep volumes, network,
 #                                          secrets, images and ~/.config/n8n/n8n.env
-#   scripts/uninstall.sh --purge [--yes]   also delete the volumes n8n_n8n_data and
-#                                          n8n_postgres_data, the network and the secrets,
+#   scripts/uninstall.sh --purge [--yes]   also delete n8n_n8n_data, n8n_postgres_data,
+#                                          optional n8n_valkey_data, network and secrets,
 #                                          after a final cold export to ~/backups/n8n/
 #   scripts/uninstall.sh --dry-run         report what would be removed
 #
@@ -36,19 +36,21 @@ ql_lock "$APP"
 if ((!purge)); then
   ql_uninstall_units "$APP"
   [[ ${QL_DRY_RUN:-0} == 1 ]] || rm -f -- "$APP_STATE_DIR/env.sha256"
-  ql_info "kept: volumes $DATA_VOLUME and $DB_VOLUME, secrets, $ENV_FILE"
+  ql_info "kept: volumes $DATA_VOLUME, $DB_VOLUME and optional $VALKEY_VOLUME, secrets, $ENV_FILE"
   exit 0
 fi
 
 app_confirm "--purge deletes the n8n volumes (workflows, credentials, encryption key), network and secrets"
 if [[ ${QL_DRY_RUN:-0} != 1 ]]; then
   # Stop first, so the final export of PGDATA is consistent.
-  systemctl --user stop "$TARGET" n8n-runners.service n8n.service n8n-postgres.service 2>/dev/null || true
+  app_stop_runtime
+  if app_installed_file n8n-postgres.container; then systemctl --user stop n8n-postgres.service; fi
+  systemctl --user stop "$TARGET" 2>/dev/null || true
   dest=$(app_new_backup_dir "$BACKUP_ROOT/purge-$(date +%Y%m%d-%H%M%S)")
-  for v in "$DATA_VOLUME" "$DB_VOLUME"; do
+  for v in "$DATA_VOLUME" "$DB_VOLUME" "$VALKEY_VOLUME"; do
     if podman volume exists "$v"; then ql_backup_volume "$v" "$dest" >/dev/null; fi
   done
-  for s in "$SECRET_DB" "$SECRET_RUNNERS"; do
+  for s in "$SECRET_DB" "$SECRET_RUNNERS" "$SECRET_VALKEY"; do
     if podman secret exists "$s"; then mkdir -p "$dest/secrets" && app_save_secret "$s" "$dest/secrets/$s"; fi
   done
   [[ ! -f $ENV_FILE ]] || cp -p -- "$ENV_FILE" "$dest/"
@@ -56,4 +58,9 @@ if [[ ${QL_DRY_RUN:-0} != 1 ]]; then
   ql_info "final backup: $dest"
 fi
 ql_uninstall_units "$APP" --purge
+if [[ ${QL_DRY_RUN:-0} != 1 ]] && podman volume exists "$VALKEY_VOLUME"; then
+  if [[ $(_ql_label_owner volume "$VALKEY_VOLUME") == "$APP" ]]; then
+    podman volume rm "$VALKEY_VOLUME" >/dev/null || ql_warn "could not remove $VALKEY_VOLUME (in use?)"
+  fi
+fi
 ql_info "the env file $ENV_FILE is kept; delete ~/.config/n8n yourself if you no longer need it"

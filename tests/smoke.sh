@@ -92,6 +92,45 @@ if app_runners_enabled; then
     ql_info "note: legacy runner config; launcher registration is not asserted"
   fi
 fi
+if app_queue_enabled; then
+  want=$(app_installed_image n8n-worker.container)
+  img=$(podman inspect --format '{{.ImageName}}' n8n-worker 2>/dev/null || true)
+  if [[ $img == "$want" ]]; then ok "n8n-worker image $img = installed unit"; else bad "n8n-worker image '${img:-?}' != installed unit $want"; fi
+  want=$(app_installed_image n8n-valkey.container)
+  img=$(podman inspect --format '{{.ImageName}}' n8n-valkey 2>/dev/null || true)
+  if [[ $img == "$want" ]]; then ok "n8n-valkey image $img = installed unit"; else bad "n8n-valkey image '${img:-?}' != installed unit $want"; fi
+  check 'Valkey accepts its mounted password' podman exec n8n-valkey /bin/sh /usr/local/bin/start-valkey.sh health
+  check 'worker can read its mounted database and queue secrets' \
+    podman exec n8n-worker sh -c 'test -s /run/secrets/n8n-db-password && test -s /run/secrets/n8n-valkey-password && test -s /run/secrets/n8n-runners-auth-token'
+  runner_wait=$timeout
+  ((runner_wait > 120)) && runner_wait=120
+  deadline=$((SECONDS + runner_wait))
+  worker_log=''
+  while ((SECONDS < deadline)); do
+    worker_log=$(podman logs n8n-worker 2>&1 || true)
+    if grep -q 'Registered runner "launcher-javascript"' <<<"$worker_log" \
+      && grep -q 'Registered runner "launcher-python"' <<<"$worker_log"; then break; fi
+    sleep 2
+  done
+  if grep -q 'Registered runner "launcher-javascript"' <<<"$worker_log" \
+    && grep -q 'Registered runner "launcher-python"' <<<"$worker_log"; then
+    ok 'worker JavaScript and Python runners registered'
+  else
+    bad 'worker JavaScript or Python runner did not register'
+  fi
+  worker_runner_config_matches() {
+    podman exec n8n-worker-runners cat /etc/n8n-task-runners.json \
+      | cmp -s "$(_ql_config_root)/n8n/n8n-task-runners.json" -
+  }
+  check 'worker runner config matches the installed allow-list' worker_runner_config_matches
+  if app_webhook_enabled; then
+    webhook_base=${base%:*}:$(ql_env_get WEBHOOK_PORT 15679)
+    check "GET $webhook_base/healthz" ql_wait_http "$webhook_base/healthz" 200 "$timeout"
+    want=$(app_installed_image n8n-webhook.container)
+    img=$(podman inspect --format '{{.ImageName}}' n8n-webhook 2>/dev/null || true)
+    if [[ $img == "$want" ]]; then ok "n8n-webhook image $img = installed unit"; else bad "n8n-webhook image '${img:-?}' != installed unit $want"; fi
+  fi
+fi
 if grep -q 'WEBHOOK_URL ->' <<<"$log"; then bad "deprecated WEBHOOK_URL is still set (use N8N_WEBHOOK_URL)"; else ok "no WEBHOOK_URL deprecation"; fi
 
 # 6. the credentials encryption key lives in the n8n_n8n_data volume
