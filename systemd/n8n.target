@@ -5,7 +5,7 @@
 [Unit]
 Description=n8n stack
 Documentation=https://github.com/WOOWTECH/Woow_podman_n8n
-Wants=n8n-postgres.service n8n.service n8n-runners.service
+Wants=n8n-postgres.service n8n-valkey.service n8n.service n8n-runners.service n8n-worker-runners.service n8n-worker.service n8n-webhook.service
 
 [Install]
 WantedBy=default.target

@@ -8,7 +8,7 @@
 #   --public-url URL       write N8N_HOST, N8N_PROTOCOL, N8N_EDITOR_BASE_URL, N8N_WEBHOOK_URL
 #                          and N8N_PROXY_HOPS=1 into ~/.config/n8n/n8n.env (tunnel / NPM)
 #   --no-runners           N8N_RUNNERS_MODE=internal: no task-runner sidecar (an installed
-#                          one is removed). Set N8N_RUNNERS_MODE=external to add it back.
+#                          one is removed). Queue mode requires external runners.
 #   --db-password-file F   first install only: take the DB password from F instead of
 #                          generating one (an existing secret is never replaced)
 #   --no-start             install the files and daemon-reload only
@@ -94,19 +94,32 @@ else
   ql_secret_ensure "$SECRET_DB" random:32
 fi
 ql_secret_ensure "$SECRET_RUNNERS" random:64
+if app_queue_enabled; then ql_secret_ensure "$SECRET_VALKEY" random:48; fi
 
 # ---- 6. install changed files, then start / restart only what changed ---------------------
-if ! app_runners_enabled && app_installed_file n8n-runners.container; then
-  ql_info "N8N_RUNNERS_MODE=internal: removing the task-runner sidecar"
-  ql_remove_files "$APP" n8n-runners.container
+topology_changed=0
+if app_is_installed; then
+  installed_queue=0 desired_queue=0 installed_webhook=0 desired_webhook=0
+  if app_installed_queue_enabled; then installed_queue=1; fi
+  if app_queue_enabled; then desired_queue=1; fi
+  if app_installed_file n8n-webhook.container; then installed_webhook=1; fi
+  if app_webhook_enabled; then desired_webhook=1; fi
+  if [[ $installed_queue != "$desired_queue" || $installed_webhook != "$desired_webhook" ]]; then topology_changed=1; fi
 fi
-if ! app_runners_enabled && app_installed_file n8n-task-runners.json; then
-  ql_remove_files "$APP" config/n8n-task-runners.json
+if ((topology_changed)) && [[ $dry != 1 ]]; then
+  if [[ ${N8N_TOPOLOGY_BACKUP_DONE:-0} != 1 ]]; then
+    backup_dir=$("$REPO/scripts/backup.sh" --cold | tail -n1)
+    ql_info "topology-change backup: $backup_dir"
+  fi
+  app_stop_runtime
 fi
-changed=$(ql_install_files "$WORK/out" "$APP")
+changed=$(ql_install_files "$WORK/out" "$APP" --prune)
 [[ -z $changed ]] || ql_info "changed: $(tr '\n' ' ' <<<"$changed")"
 if [[ $changed == *config/n8n-task-runners.json* ]]; then
-  ql_mark_changed "$APP" n8n-runners.service
+  ql_mark_changed "$APP" n8n-runners.service n8n-worker-runners.service
+fi
+if [[ $changed == *config/start-valkey.sh* ]]; then
+  ql_mark_changed "$APP" n8n-valkey.service
 fi
 [[ $render_env != "$ENV_FILE" ]] || app_env_mark_if_changed
 if [[ $dry == 1 ]]; then

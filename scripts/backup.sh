@@ -3,14 +3,14 @@
 #
 #   scripts/backup.sh [--dest DIR] [--cold]
 #
-#   (default)   hot backup while n8n runs:
+#   (default)   hot backup in regular mode; automatically cold in queue mode:
 #                 n8n-pg.dump        pg_dump -Fc of the n8n database
 #                 roles.sql          the Postgres roles with their password hashes
 #                 n8n_n8n_data-*.tar podman volume export (encryption key, custom nodes)
-#                 secrets/           n8n-db-password, n8n-runners-auth-token (0600)
+#                 secrets/           database, runner and optional Valkey secrets (0600)
 #                 n8n.env, units/, images.txt, SHA256SUMS
-#   --cold      also stop n8n.target and export n8n_postgres_data (a byte copy of PGDATA),
-#               then start the stack again
+#   --cold      stop n8n processes before the database dump; stop PostgreSQL before
+#               exporting n8n_postgres_data, and queue-mode n8n_valkey_data; restart
 #   --dest DIR  default ~/backups/n8n/<YYYYmmdd-HHMMSS>
 #
 # restore.sh <DIR> puts a backup back. Keep backups off this disk too: they contain the
@@ -36,43 +36,56 @@ done
 ql_require_rootless
 ql_lock "$APP"
 app_running "$DB_CONTAINER" || ql_die "$DB_CONTAINER is not running (start it: systemctl --user start $TARGET)"
+if app_installed_queue_enabled && ((!cold)); then
+  ql_info 'queue mode requires a consistent database and Valkey snapshot; using --cold'
+  cold=1
+fi
+mapfile -t installed_units < <(app_installed_units)
+running_version=$(app_running_version)
 
 dest=$(app_new_backup_dir "$dest")
 ql_info "backing up $APP to $dest"
 
-# ---- hot part ----------------------------------------------------------------------------
+# Stop queue producers and consumers before the dump, then PostgreSQL before byte exports.
+restart=0
+restart_stack() {
+  ((restart)) || return 0
+  systemctl --user start "${installed_units[@]}" || ql_warn 'could not restart all n8n units'
+}
+if ((cold)); then
+  ql_cleanup restart restart_stack
+  restart=1
+  ql_info 'stopping n8n application processes for a consistent cold backup'
+  app_stop_runtime
+fi
+
+# ---- database, secrets and metadata -------------------------------------------------------
 app_dump_db "$dest/n8n-pg.dump"
 app_dump_roles "$dest/roles.sql"
 mkdir -p "$dest/secrets"
-for s in "$SECRET_DB" "$SECRET_RUNNERS"; do
+for s in "$SECRET_DB" "$SECRET_RUNNERS" "$SECRET_VALKEY"; do
   if podman secret exists "$s"; then app_save_secret "$s" "$dest/secrets/$s"; fi
 done
 [[ ! -f $ENV_FILE ]] || cp -p -- "$ENV_FILE" "$dest/"
 if app_is_installed; then app_snapshot_units "$dest/units"; fi
 {
-  printf 'n8n version: %s\n' "$(app_running_version)"
+  printf 'n8n version: %s\n' "$running_version"
   podman ps -a --filter label=io.woowtech.app=n8n --format '{{.Names}} {{.Image}} {{.ImageID}}' 2>/dev/null || true
-  for i in "$N8N_IMAGE" "$RUNNERS_IMAGE" "$PG_IMAGE"; do
+  for i in "$N8N_IMAGE" "$RUNNERS_IMAGE" "$PG_IMAGE" "$VALKEY_IMAGE"; do
     printf '%s %s\n' "$i" "$(podman image inspect --format '{{index .RepoDigests 0}}' "$i" 2>/dev/null || echo '?')"
   done
 } >"$dest/images.txt"
 
-# ---- cold part: PGDATA as bytes, with the whole stack stopped ------------------------------
-restart=0
-# restart_target: bring $TARGET back if this script ends between the stop and the start below.
-# A hook, not `trap ... EXIT`, which would replace the handler ql_lock armed.
-restart_target() { ((restart)) || return 0; systemctl --user start "$TARGET" || ql_warn "could not restart $TARGET"; }
 if ((cold)); then
-  mapfile -t units < <(app_units)
-  ql_cleanup restart restart_target
-  ql_info "stopping $TARGET for the cold export"
-  restart=1
-  systemctl --user stop "${units[@]}"
+  systemctl --user stop n8n-postgres.service || ql_die 'cannot stop n8n-postgres.service'
 fi
 ql_backup_volume "$DATA_VOLUME" "$dest" >/dev/null
-((!cold)) || ql_backup_volume "$DB_VOLUME" "$dest" >/dev/null
+if ((cold)); then
+  ql_backup_volume "$DB_VOLUME" "$dest" >/dev/null
+  if app_installed_queue_enabled; then ql_backup_volume "$VALKEY_VOLUME" "$dest" >/dev/null; fi
+fi
 if ((restart)); then
-  systemctl --user start "$TARGET"
+  systemctl --user start "${installed_units[@]}"
   restart=0
 fi
 

@@ -4,11 +4,11 @@
 #   scripts/restore.sh <backup-dir> [--yes]
 #
 # 1. verifies SHA256SUMS
-# 2. stops n8n and the runners (Postgres keeps running)
+# 2. stops n8n, webhook, worker, runners and Valkey (Postgres keeps running)
 # 3. restores the secrets and the Postgres roles from the backup (the role password hash
 #    and the n8n-db-password secret travel together, so they always match)
 # 4. drops and recreates the n8n database from n8n-pg.dump (pg_restore --clean --create)
-# 5. re-imports the n8n_n8n_data volume (the credentials encryption key)
+# 5. re-imports n8n_n8n_data and, in queue mode, n8n_valkey_data
 # 6. starts n8n.target and runs tests/smoke.sh
 # The stack must be installed first (scripts/install.sh). Current data is replaced.
 # shellcheck source-path=SCRIPTDIR
@@ -41,13 +41,20 @@ ql_env_load "$ENV_FILE"
 dump=$src/n8n-pg.dump
 shopt -s nullglob
 tars=("$src/$DATA_VOLUME"-*.tar)
+valkey_tars=("$src/$VALKEY_VOLUME"-*.tar)
 shopt -u nullglob
 [[ -f $dump ]] || ql_die "$dump is missing"
 ((${#tars[@]} == 1)) || ql_die "expected exactly one $DATA_VOLUME-*.tar in $src, found ${#tars[@]}"
+if app_installed_queue_enabled; then
+  ((${#valkey_tars[@]} == 1)) || ql_die "queue restore needs exactly one $VALKEY_VOLUME-*.tar in $src"
+  [[ -s $src/secrets/$SECRET_VALKEY ]] || ql_die "queue restore needs $src/secrets/$SECRET_VALKEY"
+else
+  ((${#valkey_tars[@]} == 0)) || ql_die 'queue backup requires a queue-mode installation before restore'
+fi
 app_confirm "restore replaces the n8n database and the $DATA_VOLUME volume with $src"
 
 ql_info "stopping n8n (Postgres keeps running)"
-systemctl --user stop n8n-runners.service n8n.service
+app_stop_runtime
 systemctl --user start n8n-postgres.service
 QL_HEALTH_ACTIVE=1 ql_wait_container_healthy "$DB_CONTAINER" 180 || ql_die "$DB_CONTAINER is not healthy"
 
@@ -59,8 +66,9 @@ done
 app_restore_db "$dump"
 
 app_volume_replace "$DATA_VOLUME" "${tars[0]}"
+if app_installed_queue_enabled; then app_volume_replace "$VALKEY_VOLUME" "${valkey_tars[0]}"; fi
 
-mapfile -t units < <(app_units)
+mapfile -t units < <(app_installed_units)
 systemctl --user start "${units[@]}"
 "$REPO/tests/smoke.sh" --timeout 600 || ql_die "restored, but the smoke test failed; see: journalctl --user -u n8n.service -n 100"
 ql_info "restore of $src complete"

@@ -32,6 +32,9 @@ postgres:16.15-alpine        n8nio/n8n:2.43.6        n8nio/runners:2.43.6
 | `quadlet/n8n-postgres.container` | `n8n-postgres.service` | PostgreSQL 16 |
 | `quadlet/n8n.container` | `n8n.service` | n8n（編輯器、REST API、webhook、task broker） |
 | `quadlet/optional/n8n-runners.container` | `n8n-runners.service` | 外部 task runner（預設安裝，`--no-runners` 可略過） |
+| `quadlet/queue/n8n-valkey.container` 與 `n8n-valkey-data.volume` | `n8n-valkey.service` | 選用的密碼保護 queue broker 與持久化資料卷 |
+| `quadlet/queue/n8n-worker.container` 與 `n8n-worker-runners.container` | worker 服務 | 選用的 queue worker 與對應 Code 節點 runner |
+| `quadlet/queue/n8n-webhook.container` | `n8n-webhook.service` | 選用的正式 webhook processor |
 | `config/n8n-task-runners.json` | 掛載至 runner | 與 HA add-on 相同的 JavaScript／Python 模組匯入權限 |
 | `systemd/n8n.target` | `n8n.target` | 一次操作整個堆疊 |
 
@@ -83,11 +86,16 @@ scripts/install.sh --public-url https://n8n.example.com/
 |---|---|---|
 | `HOST_BIND` | `127.0.0.1` | 發布位址，`0.0.0.0` 代表對所有網卡開放 |
 | `HOST_PORT` | `15678` | 對外埠號（容器內 n8n 固定聽 5678） |
+| `WEBHOOK_PORT` | `15679` | 啟用 webhook processor 時使用的另一個埠號 |
 | `N8N_HOST`、`N8N_PROTOCOL` | `localhost`、`http` | n8n 認為自己被存取的主機與協定 |
 | `N8N_EDITOR_BASE_URL`、`N8N_WEBHOOK_URL` | 未設定 | 公開網址（`--public-url` 會寫入） |
 | `N8N_PROXY_HOPS` | 未設定 | 前方的 proxy 層數（Tunnel 或 NPM 為 1） |
 | `GENERIC_TIMEZONE`、`TZ` | `Asia/Taipei` | 排程與日誌時區 |
 | `N8N_RUNNERS_MODE` | `external` | `external` 會安裝 sidecar，`internal` 則在 n8n 內執行程式碼 |
+| `EXECUTIONS_MODE` | `regular` | `queue` 會安裝 Valkey、一個 worker 與其 task runner；必須使用 external runner |
+| `WORKER_CONCURRENCY` | `5` | worker 同時執行的 queue 工作數（1–100） |
+| `N8N_QUEUE_WEBHOOK_PROCESSOR` | `false` | 在 queue 模式另啟正式 webhook processor |
+| `N8N_QUEUE_DISABLE_MAIN_WEBHOOKS` | `false` | 反向代理路由驗證後，才關閉主程序接收正式 webhook |
 
 請勿設定 `N8N_PORT`（那是容器內的埠號）或 `DB_POSTGRESDB_*`，這些由 unit 決定；
 `install.sh` 會對被忽略的鍵提出警告。
@@ -98,6 +106,7 @@ scripts/install.sh --public-url https://n8n.example.com/
 |---|---|
 | `n8n-db-password` | PostgreSQL 使用 `POSTGRES_PASSWORD`；n8n 透過檔案掛載讀取 |
 | `n8n-runners-auth-token` | n8n 透過檔案讀取，runner launcher 透過 secret 環境變數讀取；internal 模式仍需建立 |
+| `n8n-valkey-password` | 選用 queue 模式時建立，由 n8n 與 Valkey 以掛載檔案讀取 |
 
 **Task runner**：外部 runner 會把 Code 節點的 JavaScript 與 Python 放到獨立容器執行，這也是
 上游的建議做法；internal 模式下，能編輯工作流程的人就能讀到加密金鑰與所有憑證。
@@ -109,6 +118,29 @@ runner 會先啟動、後停止，讓 n8n 關閉前完成執行中的流程。ru
 範例設定的 `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` 與 HA add-on 一致，讓既有流程的 `$env`
 運算式繼續讀取非機密設定。工作流程編輯者也能讀到你另外放入 `n8n.env` 的環境變數；
 供應商憑證應放在 n8n Credentials。
+
+## 選用 queue 模式
+
+在 `~/.config/n8n/n8n.env` 設定 `EXECUTIONS_MODE=queue`，依序執行
+`scripts/install.sh --dry-run` 和 `scripts/install.sh`。既有安裝切換拓樸時，安裝程式會先做
+**冷備份**，再停止應用程序並啟動新堆疊。資料庫仍使用 PostgreSQL；私有 Valkey 以 AOF 保存
+queue 資料。各 n8n 程序在共用資料卷使用不同的事件日誌檔。一個 worker 預設併行數為 5，搭配
+獨立的 JavaScript／Python runner。queue 使用 database binary storage，符合
+[n8n queue 模式要求](https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/enable-queue-mode/)。
+
+要另外啟用 webhook processor，設定 `N8N_QUEUE_WEBHOOK_PROCESSOR=true`，並選一個未占用的
+`WEBHOOK_PORT`。反向代理的 `/webhook/*` 與 `/webhook-waiting/*` 應指向
+`HOST_BIND:WEBHOOK_PORT`；`/webhook-test/*`、編輯器與 API 繼續指向 `HOST_BIND:HOST_PORT`。
+先從公開網址實測正式 webhook，確認路由正確後，再設定
+`N8N_QUEUE_DISABLE_MAIN_WEBHOOKS=true` 並重跑 `scripts/install.sh`；這個 n8n 設定只會加到
+主程序。`--public-url` 只設定 n8n 對外網址，不會修改反向代理路由。詳見
+[n8n webhook processor 路由說明](https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/enable-queue-mode/)。
+
+切換後執行 `tests/smoke.sh`。`tests/queue-integration.py` 會用隔離的 PostgreSQL、Valkey、
+兩組 runner 與真實 Code 節點 webhook 驗證 queue；需要先下載四個釘選映像檔，測試結束會
+移除測試資源。若要切回 regular，將 `N8N_QUEUE_DISABLE_MAIN_WEBHOOKS=false`、
+`N8N_QUEUE_WEBHOOK_PROCESSOR=false`、`EXECUTIONS_MODE=regular` 寫入 env 後執行
+`scripts/install.sh`。舊 Valkey 資料卷與 secret 會保留到明確執行 purge，供後續還原。
 
 ## 日常操作
 
@@ -127,8 +159,10 @@ tests/smoke.sh --public-url https://n8n.example.com/
 
 ## 升級
 
-repo 是版本的唯一來源：同時修改 `quadlet/n8n.container` 與
-`quadlet/optional/n8n-runners.container` 的 `Image=`（版本要一致），commit 之後執行：
+repo 是版本的唯一來源：同時修改 `quadlet/n8n.container`、
+`quadlet/queue/n8n-worker.container`、`quadlet/queue/n8n-webhook.container` 的 n8n 版本，
+以及 `quadlet/optional/n8n-runners.container`、
+`quadlet/queue/n8n-worker-runners.container` 的 runner 版本（都要一致），commit 後執行：
 
 ```bash
 git pull
@@ -137,7 +171,7 @@ scripts/upgrade.sh              # 跨大版本（2.x -> 3.x）需要 --allow-maj
 
 它會拒絕降版、n8n 與 runner 版本不一致、以及 Postgres 大版本變動；在停止任何服務之前先拉取
 映像檔；備份、重啟、以 900 秒逾時執行 smoke 測試；失敗時自動還原舊 unit 並回復升級前的資料庫
-（n8n 的 migration 只能往前）。
+（n8n 的 migration 只能往前）。queue 升級會先做冷備份，失敗時還原資料庫與 Valkey 狀態。
 既有主機的 `n8n.env` 不會自動加入新預設值；升級前請和 `config/n8n.env.example` 比對。
 升到 2.43.6 後，舊 API key 若因缺少新 scope 導致公開 API 回傳 403，請重新建立。
 
@@ -147,14 +181,16 @@ scripts/upgrade.sh              # 跨大版本（2.x -> 3.x）需要 --allow-maj
 ## 備份與還原
 
 ```bash
-scripts/backup.sh                     # 熱備份：資料庫 dump、角色、n8n_n8n_data、secret、unit
-scripts/backup.sh --cold              # 另外停止服務並匯出 n8n_postgres_data
+scripts/backup.sh                     # regular 為熱備份；queue 自動改為冷備份
+scripts/backup.sh --cold              # 一致性資料庫 dump 與所有使用中資料卷匯出
 scripts/restore.sh ~/backups/n8n/<timestamp> [--yes]
 ```
 
 備份目錄權限為 0700 並附上 `SHA256SUMS`，`restore.sh` 會先驗證。裡面含有**憑證加密金鑰**
 （`n8n_n8n_data`）與資料庫密碼：請另存到本機以外的地方，並比照憑證本身保護。沒有加密金鑰，
 還原後的資料庫裡的憑證也無法解密。
+queue 備份另含 `n8n_valkey_data` 與密碼 secret；請先安裝 queue 拓樸再還原，讓資料庫與待處理
+工作保持一致。
 
 每日備份（以服務帳號執行）：
 
@@ -170,7 +206,7 @@ scripts/uninstall.sh                  # 停止並移除 unit，資料全部保�
 scripts/uninstall.sh --purge --yes    # 另外刪除 volume、網路與 secret
 ```
 
-`--purge` 是本 repo 唯一會刪除資料的方式，而且會先把兩個 volume 與 secret 匯出到
+`--purge` 是本 repo 唯一會刪除資料的方式，而且會先把使用中的 volume 與 secret 匯出到
 `~/backups/n8n/purge-<timestamp>/`。`~/.config/n8n/n8n.env` 永遠保留。
 
 ## 從既有 compose / podman-compose 部署遷移

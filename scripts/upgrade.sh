@@ -38,10 +38,23 @@ ql_lock "$APP"
 app_require_installed
 ql_env_load "$ENV_FILE"
 app_validate_env
+if app_installed_queue_enabled; then
+  app_queue_enabled || ql_die 'installed queue mode differs from n8n.env; switch topology with scripts/install.sh first'
+else
+  if app_queue_enabled; then ql_die 'n8n.env requests queue mode; switch topology with scripts/install.sh first'; fi
+fi
+if app_installed_file n8n-webhook.container; then
+  app_webhook_enabled || ql_die 'installed webhook processor differs from n8n.env; switch topology with scripts/install.sh first'
+else
+  if app_webhook_enabled; then ql_die 'n8n.env requests a webhook processor; switch topology with scripts/install.sh first'; fi
+fi
 
 # ---- 1. gates -------------------------------------------------------------------------------
 [[ $(app_tag "$RUNNERS_IMAGE") == "$N8N_VERSION" ]] \
   || ql_die "the pins disagree: $N8N_IMAGE vs $RUNNERS_IMAGE (n8n and runners must carry the same version)"
+for i in "$WORKER_IMAGE" "$WEBHOOK_IMAGE" "$WORKER_RUNNERS_IMAGE"; do
+  [[ $(app_tag "$i") == "$N8N_VERSION" ]] || ql_die "queue image $i must carry n8n version $N8N_VERSION"
+done
 tgt=$N8N_VERSION
 cur=$(app_running_version)
 if [[ -z $cur ]]; then
@@ -71,7 +84,9 @@ else
 fi
 
 # ---- 2. pull before anything stops --------------------------------------------------------------
-for i in "$N8N_IMAGE" "$RUNNERS_IMAGE" "$PG_IMAGE"; do
+images=("$N8N_IMAGE" "$RUNNERS_IMAGE" "$PG_IMAGE")
+if app_queue_enabled; then images+=("$VALKEY_IMAGE"); fi
+for i in "${images[@]}"; do
   podman image exists "$i" || { ql_info "pulling $i"; podman pull "$i" >/dev/null; } || ql_die "podman pull $i failed; nothing was changed"
 done
 
@@ -102,16 +117,24 @@ rollback_incomplete() {
 }
 ql_cleanup rollback rollback_incomplete
 ql_warn "upgrade to $tgt failed; rolling back to $cur"
-systemctl --user stop n8n-runners.service n8n.service || true
+app_stop_runtime
 ql_install_files "$bk/units" "$APP" --prune >/dev/null
-ql_apply_units "$APP" n8n-postgres.service
+systemctl --user daemon-reload
+systemctl --user start n8n-postgres.service
 QL_HEALTH_ACTIVE=1 ql_wait_container_healthy "$DB_CONTAINER" 180 || ql_die "$DB_CONTAINER did not come back"
-if ((version_change)); then
-  ql_info "restoring the pre-upgrade database (the new version may have migrated it)"
+if ((version_change)) || app_installed_queue_enabled; then
+  ql_info 'restoring the pre-upgrade database'
   app_restore_db "$bk/n8n-pg.dump"
 fi
-mapfile -t units < <(app_units)
-ql_apply_units "$APP" "${units[@]}"
+if app_installed_queue_enabled; then
+  shopt -s nullglob
+  valkey_tars=("$bk/$VALKEY_VOLUME"-*.tar)
+  shopt -u nullglob
+  ((${#valkey_tars[@]} == 1)) || ql_die "rollback needs a $VALKEY_VOLUME archive in $bk"
+  app_volume_replace "$VALKEY_VOLUME" "${valkey_tars[0]}"
+fi
+mapfile -t units < <(app_installed_units)
+ql_apply_units "$APP" "$TARGET" "${units[@]}"
 app_env_record
 "$REPO/tests/smoke.sh" --timeout 600 || ql_die "the rolled-back stack failed its smoke test"
 ql_cleanup_clear rollback
